@@ -43,7 +43,14 @@ npm run build    # сборка в dist/
 
 ## Публикация
 
-Workflow `.github/workflows/deploy.yml` на каждый push в `main` прогоняет тесты, собирает и публикует сайт на GitHub Pages.
+**Vercel** (рекомендуется для проверки): vercel.com → Add New → Project → импортируйте `boldpunk/CrewPay` → Deploy.
+Настройки не нужны — Vite определяется автоматически. Каждая ветка и pull request получают свою ссылку предпросмотра,
+`main` — основной адрес. Свой домен подключается в Project → Settings → Domains.
+
+**Встроенный предпросмотр**: `npm run build:embed` собирает приложение в один файл `dist-embed/crewpay.html`
+(без печати и офлайн-режима — встроенные окна их не поддерживают).
+
+**GitHub Pages**: workflow `.github/workflows/deploy.yml` на каждый push в `main` прогоняет тесты, собирает и публикует сайт на GitHub Pages.
 Один раз включите: **Settings → Pages → Source: GitHub Actions**.
 
 ## Спорные места (по умолчанию — как в ТЗ)

@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:embed": "node scripts/build-embed.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

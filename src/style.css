@@ -24,7 +24,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #0b1220;
     --surface: #121b2d;
     --surface-2: #18233a;
@@ -45,6 +45,28 @@
     --shadow: none;
     color-scheme: dark;
   }
+}
+
+:root[data-theme='dark'] {
+  --bg: #0b1220;
+  --surface: #121b2d;
+  --surface-2: #18233a;
+  --border: #26344f;
+  --text: #e8edf6;
+  --muted: #93a3bd;
+  --accent: #f5b841;
+  --accent-2: #ffd27a;
+  --accent-contrast: #0b1220;
+  --focus: #7aa7ff;
+  --ok: #4ade80;
+  --warn-bg: #2d2410;
+  --warn-border: #6b5520;
+  --warn-text: #f5d58a;
+  --err-bg: #2e1517;
+  --err-border: #7a2c30;
+  --err-text: #ffb4b4;
+  --shadow: none;
+  color-scheme: dark;
 }
 
 * {
@@ -982,4 +1004,44 @@ body.typing .sticky-total {
   .lines tbody tr {
     break-inside: avoid;
   }
+}
+
+/* ---------- confirm dialog ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(8, 15, 28, 0.55);
+}
+
+.modal {
+  width: min(420px, 100%);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+}
+
+.modal p {
+  margin: 0 0 16px;
+  font-size: 16px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.btn.danger-fill {
+  background: #b42318;
+  border-color: #b42318;
+  color: #fff;
 }

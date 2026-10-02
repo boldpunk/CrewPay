@@ -25,6 +25,10 @@ import {
 
 type View = 'calc' | 'reference' | 'history' | 'settings';
 
+/** Сборка для предпросмотра во встроенном окне (claude.ai): там нет печати и service worker. */
+const IS_EMBED = import.meta.env.VITE_TARGET === 'embed';
+const CAN_PRINT = !IS_EMBED;
+
 let reg: Regulation = bundledRegulation as Regulation;
 let state: AppState;
 let history: HistoryEntry[] = [];
@@ -128,6 +132,41 @@ function renderView() {
   else if (view === 'reference') renderReference(root);
   else if (view === 'history') renderHistory(root);
   else renderSettings(root);
+}
+
+/** Подтверждение внутри страницы (нативный confirm() недоступен во встроенных окнах и плохо выглядит на телефоне). */
+function ask(message: string, okLabel: string, danger = false): Promise<boolean> {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="modal-msg">
+        <p id="modal-msg">${esc(message)}</p>
+        <div class="modal-actions">
+          <button class="btn" data-answer="no">Отмена</button>
+          <button class="btn ${danger ? 'danger-fill' : 'primary'}" data-answer="yes">${esc(okLabel)}</button>
+        </div>
+      </div>`;
+    const close = (answer: boolean) => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      if (prevFocus?.isConnected) prevFocus.focus();
+      resolve(answer);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close(false);
+    };
+    overlay.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t === overlay) return close(false);
+      const a = t.closest<HTMLElement>('[data-answer]')?.dataset.answer;
+      if (a) close(a === 'yes');
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    overlay.querySelector<HTMLButtonElement>('[data-answer=yes]')!.focus();
+  });
 }
 
 let toastTimer = 0;
@@ -440,16 +479,16 @@ function bindCalc(root: HTMLElement) {
     toast('Добавлен период 2 — укажите новую должность и часы');
   });
 
-  $('[data-action=remove-period]', root)?.addEventListener('click', () => {
-    if (!confirm(`Удалить период ${state.active + 1}?`)) return;
+  $('[data-action=remove-period]', root)?.addEventListener('click', async () => {
+    if (!(await ask(`Удалить период ${state.active + 1}?`, 'Удалить', true))) return;
     state.periods.splice(state.active, 1);
     state.active = 0;
     persist();
     renderCalc(root);
   });
 
-  $('[data-action=new-month]', root)!.addEventListener('click', () => {
-    if (!confirm('Очистить часы и начать новый месяц? Должность, тип ВС, оклад и ставка сохранятся.')) return;
+  $('[data-action=new-month]', root)!.addEventListener('click', async () => {
+    if (!(await ask('Очистить часы и начать новый месяц? Должность, тип ВС, оклад и ставка сохранятся.', 'Начать новый месяц'))) return;
     const first = state.periods[0];
     state.periods = [
       { ...first, hours: '', nightHours: '', holidayHours: '', nightHolidayHours: '', deadheadHours: '', worked: '' },
@@ -577,7 +616,7 @@ function renderResult() {
 
     <div class="result-actions">
       <button class="btn primary" data-action="save-history" ${ok ? '' : 'disabled'}>Сохранить в историю</button>
-      <button class="btn" data-action="print" ${ok ? '' : 'disabled'}>PDF / Печать</button>
+      ${CAN_PRINT ? `<button class="btn" data-action="print" ${ok ? '' : 'disabled'}>PDF / Печать</button>` : ''}
     </div>
     <div class="print-only print-meta">
       ${esc(monthLabel(state.month))} · Положение ${esc(reg.regulation.code)}, изд. ${reg.regulation.edition}, рев. ${reg.regulation.revision} ·
@@ -597,7 +636,7 @@ function describePeriod(i: number): string {
   return `${pos?.label ?? ''}${ac}${st && st.factor !== 1 ? `, ${st.label}` : ''}`;
 }
 
-function saveToHistory() {
+async function saveToHistory() {
   if (!lastResult || lastResult.errors.length) return;
   const entry: HistoryEntry = {
     month: state.month,
@@ -609,7 +648,7 @@ function saveToHistory() {
     state: structuredClone({ norm: state.norm, periods: state.periods, settings: state.settings }),
   };
   const exists = history.some((h) => h.month === entry.month);
-  if (exists && !confirm(`Расчёт за ${monthLabel(entry.month).toLowerCase()} уже есть в истории. Заменить?`)) return;
+  if (exists && !(await ask(`Расчёт за ${monthLabel(entry.month).toLowerCase()} уже есть в истории. Заменить?`, 'Заменить'))) return;
   history = [entry, ...history.filter((h) => h.month !== entry.month)].sort((a, b) => b.month.localeCompare(a.month));
   saveHistory(history);
   toast(`Сохранено: ${monthLabel(entry.month)}`);
@@ -663,9 +702,9 @@ function renderHistory(root: HTMLElement) {
     }),
   );
   root.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((b) =>
-    b.addEventListener('click', () => {
+    b.addEventListener('click', async () => {
       const h = history[Number(b.dataset.del)];
-      if (!confirm(`Удалить расчёт за ${monthLabel(h.month).toLowerCase()}?`)) return;
+      if (!(await ask(`Удалить расчёт за ${monthLabel(h.month).toLowerCase()}?`, 'Удалить', true))) return;
       history.splice(Number(b.dataset.del), 1);
       saveHistory(history);
       renderHistory(root);
@@ -814,8 +853,8 @@ function renderSettings(root: HTMLElement) {
     persist();
     toast('Ставки сброшены');
   });
-  $('[data-action=reset-all]', root)!.addEventListener('click', () => {
-    if (!confirm('Удалить профиль, настройки и историю на этом устройстве?')) return;
+  $('[data-action=reset-all]', root)!.addEventListener('click', async () => {
+    if (!(await ask('Удалить профиль, настройки и историю на этом устройстве?', 'Сбросить всё', true))) return;
     state = defaultState(reg);
     history = [];
     saveHistory(history);
@@ -833,7 +872,7 @@ async function boot() {
   history = loadHistory();
   renderShell();
 
-  if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  if ('serviceWorker' in navigator && import.meta.env.PROD && !IS_EMBED) {
     navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {});
   }
 }
