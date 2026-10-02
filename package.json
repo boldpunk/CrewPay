@@ -1,0 +1,19 @@
+{
+  "name": "crewpay",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Калькулятор месячного налёта и сдельной оплаты экипажа по Положению MF.FD3-01",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
+  }
+}

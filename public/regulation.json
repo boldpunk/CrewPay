@@ -1,0 +1,109 @@
+{
+  "regulation": {
+    "code": "MF.FD3-01",
+    "edition": 2,
+    "revision": 0,
+    "effectiveFrom": "2026-09-01",
+    "title": "Положение об оплате труда членов экипажей"
+  },
+  "aircraft": ["A-319", "A-320/321", "A-330", "B-757", "B-767"],
+  "constants": {
+    "nightMultiplier": 0.5,
+    "holidayExtraMultiplier": 1,
+    "pilotThresholdHours": 94.5,
+    "pilotThresholdMultiplier": 2.0,
+    "cabinTier1Hours": 70,
+    "cabinSanitaryHours": 100,
+    "cabinSanitaryMultiplier": 2.0,
+    "minimumWage": 1271000
+  },
+  "pilot": {
+    "defaultRate": 1050000,
+    "statuses": [
+      { "id": "full", "label": "Полный допуск", "factor": 1, "ref": "" },
+      { "id": "before", "label": "До допуска (×0,5)", "factor": 0.5, "ref": "п. 2.17.2" },
+      { "id": "under1000", "label": "Налёт до 1000 ч (×0,75)", "factor": 0.75, "ref": "п. 2.17.4" }
+    ],
+    "guaranteed": [
+      {
+        "id": "pilot-examiner",
+        "label": "Пилот-инструктор с допуском экзаменатор",
+        "guaranteedHours": 75,
+        "k1": [null, null, 0.95, null, 0.95],
+        "k5": [null, 2.16, 2.16, null, 2.16]
+      },
+      {
+        "id": "pilot-instructor",
+        "label": "Пилот-инструктор по типу ВС",
+        "guaranteedHours": 65,
+        "k1": [0.88, 0.81, 0.81, 0.81, 0.81],
+        "k5": [2.06, 1.51, 1.51, null, 1.51]
+      },
+      {
+        "id": "captain-training",
+        "label": "КВС с допуском тренировок",
+        "guaranteedHours": 50,
+        "k1": [null, 0.40, 0.42, null, 0.42],
+        "k5": [null, 1.78, 1.94, null, 1.94]
+      },
+      {
+        "id": "captain",
+        "label": "Командир ВС",
+        "guaranteedHours": 50,
+        "k1": [null, 0.37, 0.40, 0.37, 0.40],
+        "k5": [null, 1.68, 1.78, 1.68, 1.78]
+      },
+      {
+        "id": "first-officer",
+        "label": "Второй пилот",
+        "guaranteedHours": 50,
+        "k1": [null, 0.14, 0.19, 0.14, 0.19],
+        "k5": [null, 1.02, 1.06, 1.02, 1.06]
+      }
+    ],
+    "normative": {
+      "normHours": 20,
+      "k": [null, 3.34, 3.34, null, 3.34],
+      "positions": [
+        { "id": "technical-pilot", "label": "Технический пилот" },
+        { "id": "pilot-methodist", "label": "Пилот-инструктор-методист" },
+        { "id": "pilot-inspector", "label": "Пилот-инспектор" },
+        { "id": "pilot-quality-inspector", "label": "Пилот-инспектор по качеству" },
+        { "id": "pilot-crm", "label": "Пилот CRM-инструктор" }
+      ]
+    },
+    "fixedSalary": [
+      { "id": "pilot-command", "label": "Командно-лётный состав", "ref": "п. 1.1.1" },
+      { "id": "business-aviation", "label": "Деловая авиация", "ref": "п. 1.1.9" }
+    ]
+  },
+  "cabin": {
+    "defaultRate": 220000,
+    "statuses": [
+      { "id": "full", "label": "Полный допуск", "factor": 1, "ref": "" },
+      { "id": "before", "label": "До допуска (×0,5)", "factor": 0.5, "ref": "п. 3.14" }
+    ],
+    "positions": [
+      { "id": "fa-instructor", "label": "Бортпроводник-инструктор", "k3": 1.33, "k3over": 0.67 },
+      { "id": "fa-purser", "label": "Бортпроводник-бригадир", "k3": 1.13, "k3over": 0.66 },
+      { "id": "fa", "label": "Бортпроводник", "k3": 1.00, "k3over": 0.65 }
+    ],
+    "includedInSalary": {
+      "ref": "п. 3.2",
+      "hours": 30,
+      "positions": [
+        { "id": "fa-quality-inspector", "label": "Бортпроводник-инспектор по качеству" },
+        { "id": "fa-methodist", "label": "Бортпроводник-методист" },
+        { "id": "fa-crm", "label": "Бортпроводник CRM-инструктор" }
+      ]
+    },
+    "fixedSalary": [
+      { "id": "cabin-management", "label": "Руководство службы бортпроводников", "ref": "п. 1.1.5" }
+    ]
+  },
+  "paymentDays": {
+    "salaryDay": 15,
+    "pieceDay": 30,
+    "publicHolidays": ["01-01", "01-14", "03-08", "03-21", "05-09", "09-01", "10-01", "12-08"]
+  }
+}
