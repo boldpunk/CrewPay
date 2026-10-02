@@ -311,14 +311,32 @@ export function calculatePeriod(
       `${h(p.nightHolidayHours)} ч ночью в праздник оплачены как праздничные и исключены из ночной доплаты.`,
     );
 
-  if (p.deadheadHours > 0)
-    add({
-      title: 'Перелёт Dead Head (справочно)',
-      ref: p.category === 'pilot' ? 'п. 2.13' : 'п. 3.11',
-      formula: `${h(p.deadheadHours)} ч — не оплачивается`,
-      amount: 0,
-      part: 'info',
-    });
+  if (p.deadheadHours > 0) {
+    const dhRef = p.category === 'pilot' ? 'п. 2.13' : 'п. 3.11';
+    const dhCoef =
+      position.kind === 'guaranteed'
+        ? position.guaranteed!.k1[ac]
+        : position.kind === 'cabin'
+          ? position.cabin!.k3
+          : null;
+    const m = c.deadheadMultiplier;
+    if (dhCoef !== null && dhCoef !== undefined && m > 0)
+      add({
+        title: `Перелёт Dead Head (${num(m * 100)} %)`,
+        ref: dhRef,
+        formula: `${Sstr} × ${coef(dhCoef)} × ${h(p.deadheadHours)} × ${num(m)}`,
+        amount: S * dhCoef * p.deadheadHours * m,
+        part: 'piece',
+      });
+    else
+      add({
+        title: 'Перелёт Dead Head (справочно)',
+        ref: dhRef,
+        formula: `${h(p.deadheadHours)} ч — не оплачивается`,
+        amount: 0,
+        part: 'info',
+      });
+  }
 
   // --- Повременная часть ---
   if (p.salary > 0) {
@@ -353,9 +371,20 @@ export function calculateMonth(reg: Regulation, settings: Settings, input: Month
   if (periods.length > 1 && input.norm > 0 && clean(workedSum) > clean(input.norm))
     errors.push('Сумма отработанного по периодам превышает норму месяца.');
 
+  const extrasIn = (input.extras ?? []).filter((x) => x.title.trim() !== '' || x.amount !== 0);
+  extrasIn.forEach((x, i) => {
+    if (!Number.isFinite(x.amount)) errors.push(`Прочее начисление ${i + 1}: введите сумму числом.`);
+    else if (x.amount < 0) errors.push(`Прочее начисление ${i + 1}: сумма не может быть отрицательной.`);
+  });
+
   const piece = clean(periods.reduce((s, r) => s + r.piece, 0));
   const time = clean(periods.reduce((s, r) => s + r.time, 0));
-  const total = errors.length ? 0 : Math.round(clean(piece + time));
+  const extras = errors.length ? 0 : clean(extrasIn.reduce((s, x) => s + x.amount, 0));
+  // Как в расчётном листке: суммы до тийинов, НДФЛ и ИНПС округляются до тийина.
+  const total = errors.length ? 0 : round2(piece + time + extras);
+  const tax = round2(total * reg.constants.incomeTaxRate);
+  const inps = round2(total * reg.constants.inpsRate);
+  const net = round2(total - tax);
 
   if (!errors.length) {
     const beforeAdmission = input.periods.some((p) => p.statusId === 'before');
@@ -364,5 +393,9 @@ export function calculateMonth(reg: Regulation, settings: Settings, input: Month
         `Начислено ${money(total)} сум — меньше МРОТ (${money(reg.constants.minimumWage)} сум). До допуска зарплата не может быть ниже МРОТ.`,
       );
   }
-  return { periods, piece, time, total, errors, warnings };
+  return { periods, piece, time, extras, total, tax, inps, net, errors, warnings };
+}
+
+function round2(x: number): number {
+  return Math.round(clean(x) * 100) / 100;
 }

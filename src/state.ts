@@ -19,26 +19,62 @@ export interface PeriodForm {
   rate: string;
 }
 
+export interface ExtraForm {
+  title: string;
+  amount: string;
+}
+
+export type Theme = 'system' | 'light' | 'dark';
+
 export interface AppState {
   month: string;
   norm: string;
   periods: PeriodForm[];
+  extras: ExtraForm[];
   active: number;
   settings: Settings;
+  theme: Theme;
+}
+
+/** Аккаунт на устройстве: данные из расчётного листка. */
+export interface Profile {
+  name: string;
+  email: string;
+  employeeId: string;
+  organization: string;
+  department: string;
+  createdAt: string;
 }
 
 export interface HistoryEntry {
   month: string;
   savedAt: string;
   total: number;
+  net: number;
   piece: number;
   time: number;
+  extras: number;
   label: string;
-  state: Pick<AppState, 'norm' | 'periods' | 'settings'>;
+  state: Pick<AppState, 'norm' | 'periods' | 'extras' | 'settings'>;
+}
+
+/** Резервная копия аккаунта: переносится на другое устройство файлом. */
+export interface Backup {
+  app: 'crewpay';
+  version: 1;
+  exportedAt: string;
+  profile: Profile | null;
+  state: AppState;
+  history: HistoryEntry[];
+  salaries: Record<string, string>;
 }
 
 const STATE_KEY = 'crewpay.state.v1';
 const HISTORY_KEY = 'crewpay.history.v1';
+const PROFILE_KEY = 'crewpay.profile.v1';
+const SALARY_KEY = 'crewpay.salaries.v1';
+
+export const EXTRA_PRESETS = ['Надбавка', 'Медицинский осмотр', 'Премия', 'Отпускные', 'Командировочные'];
 
 export function currentMonth(d = new Date()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -49,8 +85,8 @@ export function defaultPeriod(reg: Regulation, category: Category = 'pilot'): Pe
   return {
     category,
     positionId: isPilot
-      ? (reg.pilot.guaranteed.find((g) => g.id === 'captain') ?? reg.pilot.guaranteed[0])?.id ?? ''
-      : (reg.cabin.positions.find((c) => c.id === 'fa') ?? reg.cabin.positions[0])?.id ?? '',
+      ? ((reg.pilot.guaranteed.find((g) => g.id === 'captain') ?? reg.pilot.guaranteed[0])?.id ?? '')
+      : ((reg.cabin.positions.find((c) => c.id === 'fa') ?? reg.cabin.positions[0])?.id ?? ''),
     aircraft: -1,
     hours: '',
     nightHours: '',
@@ -69,13 +105,15 @@ export function defaultState(reg: Regulation): AppState {
     month: currentMonth(),
     norm: '',
     periods: [defaultPeriod(reg)],
+    extras: [],
     active: 0,
     settings: { ...DEFAULT_SETTINGS },
+    theme: 'system',
   };
 }
 
 /** Приводит сохранённое состояние к актуальному справочнику (должности могли измениться). */
-export function sanitize(reg: Regulation, s: AppState): AppState {
+export function sanitize(reg: Regulation, s: Partial<AppState>): AppState {
   const periods = (Array.isArray(s.periods) && s.periods.length ? s.periods : [defaultPeriod(reg)]).map((p) => {
     const base = defaultPeriod(reg, p.category === 'cabin' ? 'cabin' : 'pilot');
     const merged: PeriodForm = { ...base, ...p };
@@ -84,12 +122,19 @@ export function sanitize(reg: Regulation, s: AppState): AppState {
     if (!Number.isInteger(merged.aircraft) || merged.aircraft >= reg.aircraft.length) merged.aircraft = -1;
     return merged;
   });
+  const extras = Array.isArray(s.extras)
+    ? s.extras
+        .filter((x) => x && typeof x.title === 'string')
+        .map((x) => ({ title: x.title, amount: String(x.amount ?? '') }))
+    : [];
   return {
-    month: /^\d{4}-\d{2}$/.test(s.month) ? s.month : currentMonth(),
+    month: typeof s.month === 'string' && /^\d{4}-\d{2}$/.test(s.month) ? s.month : currentMonth(),
     norm: typeof s.norm === 'string' ? s.norm : '',
     periods,
-    active: Math.min(Math.max(0, s.active | 0), periods.length - 1),
+    extras,
+    active: Math.min(Math.max(0, (s.active ?? 0) | 0), periods.length - 1),
     settings: { ...DEFAULT_SETTINGS, ...(s.settings ?? {}) },
+    theme: s.theme === 'light' || s.theme === 'dark' ? s.theme : 'system',
   };
 }
 
@@ -104,10 +149,15 @@ function readJson<T>(key: string): T | null {
 
 function writeJson(key: string, value: unknown) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
   } catch {
     /* хранилище недоступно (приватный режим) — работаем без сохранения */
   }
+}
+
+export function hasSavedState(): boolean {
+  return readJson(STATE_KEY) !== null || readJson(PROFILE_KEY) !== null;
 }
 
 export function loadState(reg: Regulation): AppState {
@@ -121,11 +171,51 @@ export function saveState(s: AppState) {
 
 export function loadHistory(): HistoryEntry[] {
   const h = readJson<HistoryEntry[]>(HISTORY_KEY);
-  return Array.isArray(h) ? h : [];
+  return Array.isArray(h) ? h.map((e) => ({ ...e, net: e.net ?? e.total, extras: e.extras ?? 0 })) : [];
 }
 
 export function saveHistory(entries: HistoryEntry[]) {
   writeJson(HISTORY_KEY, entries);
+}
+
+export function loadProfile(): Profile | null {
+  return readJson<Profile>(PROFILE_KEY);
+}
+
+export function saveProfile(p: Profile | null) {
+  writeJson(PROFILE_KEY, p);
+}
+
+/** Личные оклады по должностям: вводятся один раз и подставляются при выборе должности. */
+export function loadSalaries(): Record<string, string> {
+  return readJson<Record<string, string>>(SALARY_KEY) ?? {};
+}
+
+export function saveSalaries(s: Record<string, string>) {
+  writeJson(SALARY_KEY, s);
+}
+
+export function makeBackup(
+  profile: Profile | null,
+  state: AppState,
+  history: HistoryEntry[],
+  salaries: Record<string, string>,
+): Backup {
+  return { app: 'crewpay', version: 1, exportedAt: new Date().toISOString(), profile, state, history, salaries };
+}
+
+export function parseBackup(reg: Regulation, data: unknown): Backup | null {
+  const b = data as Backup;
+  if (!b || b.app !== 'crewpay' || typeof b.state !== 'object') return null;
+  return {
+    app: 'crewpay',
+    version: 1,
+    exportedAt: String(b.exportedAt ?? ''),
+    profile: b.profile && typeof b.profile === 'object' ? b.profile : null,
+    state: sanitize(reg, b.state),
+    history: Array.isArray(b.history) ? b.history : [],
+    salaries: b.salaries && typeof b.salaries === 'object' ? b.salaries : {},
+  };
 }
 
 export function toMonthInput(s: AppState): MonthInput {
@@ -148,5 +238,6 @@ export function toMonthInput(s: AppState): MonthInput {
       salary: parseMoney(p.salary),
       rate: parseMoney(p.rate),
     })),
+    extras: s.extras.map((x) => ({ title: x.title, amount: parseMoney(x.amount) })),
   };
 }

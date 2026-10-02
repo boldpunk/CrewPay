@@ -11,6 +11,7 @@ export interface Status {
 export interface GuaranteedPosition {
   id: string;
   label: string;
+  salary?: number | null;
   guaranteedHours: number;
   /** Табл. 2-1, по индексу типа ВС; null — прочерк (сочетание недоступно). */
   k1: Coef[];
@@ -22,11 +23,14 @@ export interface LabeledPosition {
   id: string;
   label: string;
   ref?: string;
+  /** Оклад по штатному расписанию, сум; null — не задан. */
+  salary?: number | null;
 }
 
 export interface CabinPosition {
   id: string;
   label: string;
+  salary?: number | null;
   /** Табл. 3-1, до 70 ч. */
   k3: number;
   /** Табл. 3-2, свыше 70 ч. */
@@ -51,6 +55,12 @@ export interface Regulation {
     cabinSanitaryHours: number;
     cabinSanitaryMultiplier: number;
     minimumWage: number;
+    /** Доля оплаты перелёта Dead Head (0,5 — 50 %). 0 — не оплачивается. */
+    deadheadMultiplier: number;
+    /** НДФЛ, включая ИНПС. */
+    incomeTaxRate: number;
+    /** ИНПС — справочно, входит в НДФЛ. */
+    inpsRate: number;
   };
   pilot: {
     defaultRate: number;
@@ -107,10 +117,17 @@ export interface PeriodInput {
   rate: number;
 }
 
+/** Начисление, которое Положение не рассчитывает (надбавка, медосмотр, премия): вводится суммой из листка. */
+export interface ExtraInput {
+  title: string;
+  amount: number;
+}
+
 export interface MonthInput {
   /** Норма рабочего времени месяца (дни или часы). */
   norm: number;
   periods: PeriodInput[];
+  extras?: ExtraInput[];
 }
 
 export type PositionKind = 'guaranteed' | 'normative' | 'fixed' | 'cabin' | 'cabinIncluded';
@@ -135,7 +152,7 @@ export interface Line {
   formula: string;
   /** Сумма, сум (без округления). */
   amount: number;
-  part: 'piece' | 'time' | 'info';
+  part: 'piece' | 'time' | 'extra' | 'info';
 }
 
 export interface Hint {
@@ -157,8 +174,16 @@ export interface MonthResult {
   periods: PeriodResult[];
   piece: number;
   time: number;
-  /** Итог, округлённый до 1 сум. */
+  /** Прочие начисления (надбавки и т. п.). */
+  extras: number;
+  /** Начислено всего (брутто), до тийинов. */
   total: number;
+  /** НДФЛ (включая ИНПС). */
+  tax: number;
+  /** ИНПС — справочно, входит в tax. */
+  inps: number;
+  /** К выплате. */
+  net: number;
   errors: string[];
   warnings: string[];
 }

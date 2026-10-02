@@ -3,3 +3,5 @@ dist
 *.log
 .DS_Store
 dist-embed
+*.seed.json
+accounts/

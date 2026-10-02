@@ -38,3 +38,22 @@ export function paymentSchedule(reg: Regulation, ym: string): { salary: Date; pi
 export function formatDate(d: Date): string {
   return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', weekday: 'short' });
 }
+
+/** Рабочих дней в месяце по календарю: пятидневка или шестидневка, без праздников из справочника. */
+export function workingDays(reg: Regulation, ym: string, sixDay: boolean): number | null {
+  const m = /^(\d{4})-(\d{2})$/.exec(ym);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]) - 1;
+  const last = new Date(year, month + 1, 0).getDate();
+  let n = 0;
+  for (let day = 1; day <= last; day++) {
+    const d = new Date(year, month, day);
+    const dow = d.getDay();
+    if (dow === 0 || (!sixDay && dow === 6)) continue;
+    const md = `${pad(month + 1)}-${pad(day)}`;
+    if (reg.paymentDays.publicHolidays.includes(md) || reg.paymentDays.publicHolidays.includes(`${year}-${md}`)) continue;
+    n++;
+  }
+  return n;
+}

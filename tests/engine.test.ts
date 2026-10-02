@@ -225,10 +225,10 @@ describe('Валидации', () => {
     expect(r.total).toBe(Math.round(fo + cpt));
   });
 
-  it('округляется только итог', () => {
+  it('итог — до тийинов, как в расчётном листке', () => {
     const r = run(cabin({ hours: 0.1, nightHours: 0, rate: 220_005 }));
     expect(r.periods[0].lines[0].amount).toBeCloseTo(22_000.5, 6);
-    expect(r.total).toBe(22_001);
+    expect(r.total).toBe(22_000.5);
   });
 });
 
@@ -257,5 +257,64 @@ describe('Сроки выплат', () => {
     const s = paymentSchedule(reg, '2027-01')!;
     expect(s.salary.toDateString()).toBe(new Date(2027, 1, 15).toDateString());
     expect(s.piece.toDateString()).toBe(new Date(2027, 1, 26).toDateString());
+  });
+});
+
+describe('Сверка с реальным расчётным листком (август 2026, бортпроводник-инструктор)', () => {
+  // Норма 25 дн., отработано 23, оклад 9 500 000; налёт 56,2 ч, ночь 0,79 ч,
+  // Dead Head 6,9 ч фактически (в листке — 3,45 оплачиваемых часа, «50%»),
+  // надбавка и медосмотр — суммами из листка.
+  const r = calculateMonth(reg, DEFAULT_SETTINGS, {
+    norm: 25,
+    periods: [
+      cabin({
+        positionId: 'fa-instructor',
+        hours: 56.2,
+        nightHours: 0.79,
+        deadheadHours: 6.9,
+        worked: 23,
+        salary: 9_500_000,
+      }),
+    ],
+    extras: [
+      { title: 'Надбавка', amount: 1_852_718.49 },
+      { title: 'Медицинский осмотр', amount: 2_671_132.14 },
+    ],
+  });
+  const byTitle = Object.fromEntries(r.periods[0].lines.map((l) => [l.title, l.amount]));
+
+  it('построчно совпадает с листком', () => {
+    expect(r.errors).toEqual([]);
+    expect(byTitle['Должностной оклад']).toBe(8_740_000);
+    expect(byTitle['Налёт до 70 ч']).toBe(16_444_120);
+    expect(byTitle['Ночной налёт']).toBe(115_577);
+    expect(byTitle['Перелёт Dead Head (50 %)']).toBe(1_009_470);
+    expect(r.extras).toBe(4_523_850.63);
+  });
+
+  it('начислено, НДФЛ, ИНПС и к выплате совпадают до тийина', () => {
+    expect(r.total).toBe(30_833_017.63);
+    expect(r.tax).toBe(3_699_962.12);
+    expect(r.inps).toBe(30_833.02);
+    expect(r.net).toBe(27_133_055.51);
+  });
+});
+
+describe('Dead Head и прочие начисления', () => {
+  it('пилот: Dead Head по коэф. табл. 2-1 × 50 %', () => {
+    const a = amounts(pilot({ deadheadHours: 4 }));
+    expect(a['п. 2.13']).toBeCloseTo(1_050_000 * 0.81 * 4 * 0.5, 4);
+  });
+  it('норматив: Dead Head справочно', () => {
+    const r = run(pilot({ positionId: 'pilot-inspector', hours: 25, nightHours: 0, deadheadHours: 4 }));
+    expect(r.periods[0].lines.find((l) => l.ref === 'п. 2.13')!.amount).toBe(0);
+  });
+  it('отрицательная надбавка — ошибка', () => {
+    const r = calculateMonth(reg, DEFAULT_SETTINGS, {
+      norm: 22,
+      periods: [pilot()],
+      extras: [{ title: 'Надбавка', amount: -5 }],
+    });
+    expect(r.errors.length).toBe(1);
   });
 });
