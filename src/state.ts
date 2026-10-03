@@ -1,5 +1,6 @@
 import { findPosition, statusesFor } from './calc/engine';
 import { parseHours, parseMoney } from './calc/format';
+import type { Payslip } from './calc/payslip';
 import type { Category, MonthInput, PeriodInput, Regulation, Settings } from './calc/types';
 import { DEFAULT_SETTINGS } from './calc/types';
 
@@ -26,6 +27,14 @@ export interface ExtraForm {
 
 export type Theme = 'system' | 'light' | 'dark';
 
+/** Расчётный листок, из которого заполнен месяц (хранится на сервере). */
+export interface AttachedPayslip {
+  id: string;
+  filename: string;
+  uploadedAt: string;
+  parsed: Payslip;
+}
+
 export interface AppState {
   month: string;
   norm: string;
@@ -34,6 +43,7 @@ export interface AppState {
   active: number;
   settings: Settings;
   theme: Theme;
+  payslip: AttachedPayslip | null;
 }
 
 /** Аккаунт на устройстве: данные из расчётного листка. */
@@ -55,6 +65,7 @@ export interface HistoryEntry {
   time: number;
   extras: number;
   label: string;
+  payslipId?: string | null;
   state: Pick<AppState, 'norm' | 'periods' | 'extras' | 'settings'>;
 }
 
@@ -109,6 +120,7 @@ export function defaultState(reg: Regulation): AppState {
     active: 0,
     settings: { ...DEFAULT_SETTINGS },
     theme: 'system',
+    payslip: null,
   };
 }
 
@@ -135,6 +147,10 @@ export function sanitize(reg: Regulation, s: Partial<AppState>): AppState {
     active: Math.min(Math.max(0, (s.active ?? 0) | 0), periods.length - 1),
     settings: { ...DEFAULT_SETTINGS, ...(s.settings ?? {}) },
     theme: s.theme === 'light' || s.theme === 'dark' ? s.theme : 'system',
+    payslip:
+      s.payslip && typeof s.payslip === 'object' && typeof s.payslip.id === 'string' && s.payslip.parsed
+        ? s.payslip
+        : null,
   };
 }
 

@@ -1,0 +1,30 @@
+services:
+  web:
+    image: ghcr.io/boldpunk/crewpay:latest
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # Только localhost — TLS и 80/443 держит nginx/caddy на сервере.
+    ports:
+      - "127.0.0.1:3020:3000"
+    # Справочник ставок можно править на сервере без релиза:
+    # положите regulation.json рядом и раскомментируйте, затем REGULATION_PATH=/app/config/regulation.json в .env
+    # volumes:
+    #   - ./regulation.json:/app/config/regulation.json:ro
+
+  # Свой Postgres на этом же сервере (если не используете Neon):
+  #   docker compose --profile db up -d
+  #   DATABASE_URL=postgresql://crewpay:<пароль>@db:5432/crewpay в .env
+  db:
+    image: postgres:16-alpine
+    profiles: ["db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: crewpay
+      POSTGRES_DB: crewpay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}  # обязателен, если запускаете профиль db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

@@ -10,11 +10,29 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build:embed": "node scripts/build-embed.mjs"
+    "build:embed": "node scripts/build-embed.mjs",
+    "dev:server": "tsx watch server/index.ts",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outfile=dist-server/index.mjs && rm -rf dist-server/fonts && cp -r server/fonts dist-server/fonts",
+    "start": "node dist-server/index.mjs"
   },
   "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/pdfkit": "^0.17.6",
+    "@types/pg": "^8.23.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vite": "^6.4.3",
     "vitest": "^3.2.7"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.3",
+    "bcryptjs": "^3.0.3",
+    "drizzle-orm": "^0.45.3",
+    "hono": "^4.13.12",
+    "pdfjs-dist": "^6.3.289",
+    "pdfkit": "^0.20.2",
+    "pg": "^8.23.1",
+    "zod": "^4.6.5"
   }
 }

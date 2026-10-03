@@ -20,38 +20,73 @@
 
 Ввод часов: `65`, `65,5`, `65.5` или `65:30`.
 
+## Аккаунты и расчётные листки
+
+- Регистрация по email и паролю (bcrypt), сессия — httpOnly-cookie на 30 дней; в базе хранится только хеш токена.
+- **Загрузка расчётного листка (PDF из 1С)**: сервер читает PDF, программа сама заполняет месяц, норму
+  (выводится из оплаты по окладу), часы, Dead Head, оклад, ставку и прочие начисления — и **сверяет каждую строку**
+  с расчётом по Положению. Расхождения подсвечиваются.
+- **PDF-отчёт**: оформленный документ с итогом, строками и формулами, сверкой с листком;
+  в подвале — ссылка на сайт, с которого он сформирован (`SITE_URL`).
+- Без входа приложение работает локально, как раньше.
+
 ## Ставки и коэффициенты
 
-Все значения — в [`public/regulation.json`](public/regulation.json). Приложение загружает этот файл при запуске,
-поэтому администратор может поменять ставку или коэффициенты прямо на сервере, без нового релиза.
-Прочерк в Положении — `null` (сочетание недоступно).
-
-Подвижные праздники (Рамазан и Курбан хайит) добавляйте в `paymentDays.publicHolidays` в формате `YYYY-MM-DD`.
-МРОТ (`constants.minimumWage`) нужно проверить и обновлять при изменении.
+Все значения — в [`public/regulation.json`](public/regulation.json). Сервер перечитывает файл при изменении,
+поэтому ставки можно править без релиза (см. `REGULATION_PATH` ниже). Прочерк в Положении — `null`.
+Оклады по штатному расписанию — поле `salary` у должности. Подвижные праздники добавляйте в
+`paymentDays.publicHolidays` как `YYYY-MM-DD`; МРОТ — `constants.minimumWage`.
 
 ## Разработка
 
+Нужны Node 22 и Postgres 16.
+
 ```bash
 npm install
-npm run dev      # локальный сервер
-npm test         # тесты, включая приёмочные примеры из раздела 6 ТЗ
-npm run build    # сборка в dist/
+DATABASE_URL=postgresql://localhost/crewpay npm run dev:server   # API на :3000
+npm run dev                                                        # сайт на :5173 (проксирует /api)
+TEST_DATABASE_URL=postgresql://localhost/crewpay_test npm test     # тесты; без переменной API-тесты пропускаются
+npm run build && npm run build:server && npm start                 # как в продакшене
 ```
 
-Стек: TypeScript + Vite, без фреймворков. Расчёт — чистые функции в `src/calc/engine.ts`, покрытые тестами в `tests/`.
+Стек: TypeScript, Vite (фронтенд без фреймворков), Hono + Drizzle + Postgres (сервер), pdf.js (чтение листков),
+pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). Расчёт — чистые функции в `src/calc/`,
+общие для сайта и сервера.
 
-## Публикация
+## Переменные окружения
 
-**Vercel** (рекомендуется для проверки): vercel.com → Add New → Project → импортируйте `boldpunk/CrewPay` → Deploy.
-Настройки не нужны — Vite определяется автоматически. Каждая ветка и pull request получают свою ссылку предпросмотра,
-`main` — основной адрес. Свой домен подключается в Project → Settings → Domains.
+| Переменная | Обязательна | Назначение |
+|---|---|---|
+| `DATABASE_URL` | да | Postgres (Neon или свой). Таблицы создаются при запуске |
+| `SITE_URL` | да в продакшене | Адрес сайта для ссылки в PDF, напр. `https://crewpay.uz` |
+| `PORT` | нет | По умолчанию 3000 |
+| `REGULATION_PATH` | нет | Путь к `regulation.json` вне образа — править ставки без релиза |
 
-**Встроенный предпросмотр**: `npm run build:embed` собирает приложение в один файл `dist-embed/crewpay.html`
-(без печати и офлайн-режима — встроенные окна их не поддерживают). `SEED=путь/к/копии.json npm run build:embed`
-встраивает готовый аккаунт; личные файлы в репозиторий не коммитятся.
+## Деплой на сервер (как molly.uz)
 
-**GitHub Pages**: workflow `.github/workflows/deploy.yml` на каждый push в `main` прогоняет тесты, собирает и публикует сайт на GitHub Pages.
-Один раз включите: **Settings → Pages → Source: GitHub Actions**.
+Каждый push в `main`: тесты на Postgres → Docker-образ `ghcr.io/boldpunk/crewpay` → `docker compose up` на сервере по SSH.
+Пока секреты не заданы, образ собирается, а шаг деплоя пропускается.
+
+1. GitHub → Settings → Secrets and variables → Actions: `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, `DATABASE_URL`, `SITE_URL`
+   (и `POSTGRES_PASSWORD`, если база — в `docker compose --profile db` на этом же сервере).
+2. На сервере nginx проксирует домен на `127.0.0.1:3020` и передаёт протокол:
+
+```nginx
+server {
+    server_name crewpay.uz;
+    client_max_body_size 6m;
+    location / {
+        proxy_pass http://127.0.0.1:3020;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+3. HTTPS — `certbot --nginx -d crewpay.uz` (нужен для входа: cookie сессии только по HTTPS, и для установки PWA).
+
+`npm run build:embed` собирает статический предпросмотр одним файлом (без сервера; `SEED=файл.json` встраивает аккаунт).
 
 ## Спорные места (по умолчанию — как в ТЗ)
 

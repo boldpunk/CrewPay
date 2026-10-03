@@ -3,6 +3,8 @@ import bundledRegulation from '../public/regulation.json';
 import { availableAircraft, calculateMonth, findPosition, positionsFor, statusesFor } from './calc/engine';
 import { coef, hours as fmtHours, money, num, parseHours, parseMoney } from './calc/format';
 import { formatDate, paymentSchedule, workingDays } from './calc/paydates';
+import { type ReconRow, reconcile } from './calc/payslip';
+import { type Account, ApiError, type ServerProfile, type UploadedPayslip, api } from './api';
 import type { Category, MonthResult, Regulation, ResolvedPosition } from './calc/types';
 import {
   type AppState,
@@ -44,6 +46,9 @@ let profile: Profile | null = null;
 let salaries: Record<string, string> = {};
 let view: View = 'calc';
 let lastResult: MonthResult | null = null;
+/** Сервер доступен (на статическом хостинге и в предпросмотре — нет). */
+let serverUp = false;
+let account: Account | null = null;
 
 const app = document.getElementById('app')!;
 
@@ -382,6 +387,7 @@ function renderCalc(root: HTMLElement) {
   root.innerHTML = `
     <div class="layout">
       <section class="form-col" aria-label="Ввод данных">
+        ${uploadCard()}
         <div class="card">
           <div class="month-stepper">
             <button class="icon-btn" data-month="-1" aria-label="Предыдущий месяц">${icon('chevron', 'icon rot90')}</button>
@@ -569,6 +575,161 @@ function renderCalc(root: HTMLElement) {
   renderResult();
 }
 
+// ---------- расчётный листок ----------
+
+let importNotes: string[] = [];
+
+function uploadCard(): string {
+  if (!serverUp) return '';
+  if (!account)
+    return `
+    <div class="card upload upload-guest">
+      <div class="upload-icon">${icon('receipt')}</div>
+      <div class="upload-text">
+        <b>Загрузите расчётный листок — посчитаем сами</b>
+        <span class="muted small">Войдите, чтобы загружать листки PDF и хранить расчёты в облаке.</span>
+      </div>
+      <button class="btn primary small" data-go="profile">${icon('user')}Войти</button>
+    </div>`;
+  const ps = state.payslip;
+  return `
+    <div class="card upload" id="upload">
+      <input type="file" id="payslip-file" accept="application/pdf,.pdf" hidden />
+      <label for="payslip-file" class="dropzone" id="dropzone">
+        <span class="upload-icon">${icon('upload')}</span>
+        <span class="upload-text">
+          <b>${ps ? 'Загрузить другой листок' : 'Загрузить расчётный листок'}</b>
+          <span class="muted small">PDF из 1С — месяц, часы и суммы заполнятся сами, каждая строка будет сверена</span>
+        </span>
+      </label>
+      ${
+        ps
+          ? `<div class="attached">
+              ${icon('receipt')}
+              <span class="attached-name">${esc(ps.filename)}</span>
+              <a class="chip" href="${api.payslipUrl(ps.id)}" target="_blank" rel="noopener">${icon('arrowUpRight')}PDF</a>
+              <button class="chip ghost" data-action="detach">${icon('x')}Открепить</button>
+            </div>`
+          : ''
+      }
+      ${importNotes.length ? `<div class="alert warn">${icon('alert')}<ul>${importNotes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></div>` : ''}
+    </div>`;
+}
+
+function applyImport(u: UploadedPayslip) {
+  const im = u.imported;
+  const prev = period();
+  const base = defaultPeriod(reg, im.category);
+  const pos = im.positionId ? findPosition(reg, im.category, im.positionId) : undefined;
+  const hrs = (n: number) => (n ? num(n) : '');
+  state = {
+    ...state,
+    month: im.month ?? state.month,
+    norm: im.norm ? String(im.norm) : state.norm,
+    active: 0,
+    periods: [
+      {
+        ...base,
+        positionId: pos?.id ?? (prev.category === im.category ? prev.positionId : base.positionId),
+        aircraft: prev.category === im.category && prev.positionId === pos?.id ? prev.aircraft : -1,
+        statusId: prev.category === im.category ? prev.statusId : base.statusId,
+        hours: hrs(im.hours),
+        nightHours: hrs(im.nightHours),
+        holidayHours: hrs(im.holidayHours),
+        deadheadHours: hrs(im.deadheadHours),
+        worked: im.worked ? num(im.worked) : '',
+        salary: im.salary ? num(im.salary) : '',
+        rate: im.rate ? num(im.rate) : base.rate,
+      },
+    ],
+    extras: im.extras.map((x) => ({ title: x.title, amount: num(x.amount) })),
+    payslip: { id: u.id, filename: u.filename, uploadedAt: u.createdAt, parsed: u.parsed },
+  };
+  if (pos && im.salary) {
+    salaries[pos.id] = num(im.salary);
+    saveSalaries(salaries);
+  }
+  // Пустые поля профиля заполняем из шапки листка.
+  const pr = u.parsed;
+  profile = {
+    name: profile?.name || pr.name,
+    email: profile?.email || account?.email || '',
+    employeeId: profile?.employeeId || pr.employeeId,
+    organization: profile?.organization || pr.organization,
+    department: profile?.department || pr.department,
+    createdAt: profile?.createdAt || new Date().toISOString(),
+  };
+  saveProfile(profile);
+  syncProfileSoon();
+  importNotes = im.notes;
+  persist();
+}
+
+async function handleUpload(root: HTMLElement, file: File) {
+  const zone = $('#dropzone', root);
+  if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') return toast('Нужен PDF-файл');
+  zone?.classList.add('busy');
+  const title = zone?.querySelector('b');
+  if (title) title.textContent = 'Распознаю листок…';
+  try {
+    const u = await api.uploadPayslip(file);
+    applyImport(u);
+    renderShell();
+    const rows = currentRecon();
+    const bad = rows.filter((r) => !r.ok).length;
+    toast(
+      rows.length
+        ? bad
+          ? `${monthLabel(state.month)}: расхождений ${bad}`
+          : `${monthLabel(state.month)}: все ${rows.length} строк совпадают`
+        : `Листок за ${monthLabel(state.month).toLowerCase()} загружен`,
+    );
+  } catch (e) {
+    zone?.classList.remove('busy');
+    if (title) title.textContent = 'Загрузить расчётный листок';
+    toast(e instanceof ApiError ? e.message : 'Не удалось загрузить файл');
+  }
+}
+
+function bindUpload(root: HTMLElement) {
+  $('[data-go=profile]', root)?.addEventListener('click', () => go('profile'));
+  const input = $<HTMLInputElement>('#payslip-file', root);
+  const zone = $('#dropzone', root);
+  if (!input || !zone) return;
+  input.addEventListener('change', () => {
+    const f = input.files?.[0];
+    if (f) handleUpload(root, f);
+  });
+  zone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    zone.classList.add('over');
+  });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('over');
+    const f = e.dataTransfer?.files?.[0];
+    if (f) handleUpload(root, f);
+  });
+  $('[data-action=detach]', root)?.addEventListener('click', () => {
+    state.payslip = null;
+    importNotes = [];
+    persist();
+    renderCalc(root);
+  });
+}
+
+/** Сверка текущего расчёта с прикреплённым листком (тот же код, что на сервере). */
+function currentRecon(): ReconRow[] {
+  const ps = state.payslip;
+  if (!ps || ps.parsed.month !== state.month) return [];
+  try {
+    return reconcile(reg, state.settings, ps.parsed, toMonthInput(state));
+  } catch {
+    return [];
+  }
+}
+
 function selectPosition(root: HTMLElement, category: Category, id: string) {
   const p = period();
   const prevSalary = salaryFor(findPosition(reg, p.category, p.positionId));
@@ -686,9 +847,11 @@ function rememberSalary(raw: string) {
   if (raw.trim() === '') delete salaries[id];
   else if (Number.isFinite(v) && v > 0) salaries[id] = num(v);
   saveSalaries(salaries);
+  syncProfileSoon();
 }
 
 function bindCalc(root: HTMLElement) {
+  bindUpload(root);
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input, select').forEach((el) => {
     if (el.id === 'pos-input') return;
     // На телефоне плавающий итог не должен закрывать поле над клавиатурой.
@@ -755,12 +918,14 @@ function bindCalc(root: HTMLElement) {
   monthInput.addEventListener('change', () => {
     if (!monthInput.value) return;
     state.month = monthInput.value;
+    if (state.payslip?.parsed.month !== state.month) state.payslip = null;
     persist();
     renderCalc(root);
   });
   root.querySelectorAll<HTMLButtonElement>('[data-month]').forEach((b) =>
     b.addEventListener('click', () => {
       state.month = shiftMonth(state.month, Number(b.dataset.month));
+      if (state.payslip?.parsed.month !== state.month) state.payslip = null;
       persist();
       renderCalc(root);
     }),
@@ -841,6 +1006,8 @@ function bindCalc(root: HTMLElement) {
     state.extras = [];
     state.active = 0;
     state.norm = '';
+    state.payslip = null;
+    importNotes = [];
     state.month = shiftMonth(state.month, 1);
     persist();
     renderCalc(root);
@@ -979,6 +1146,36 @@ function renderResult() {
   );
   const notes = result.periods.flatMap((pr) => pr.notes);
 
+  const recon = ok ? currentRecon() : [];
+  const reconBad = recon.filter((r) => !r.ok).length;
+  const ps = state.payslip;
+  const reconCard =
+    ps && ok
+      ? ps.parsed.month !== state.month
+        ? `<div class="alert warn">${icon('alert')}<div>Прикреплён листок за ${esc(monthLabel(ps.parsed.month ?? ''))}, а расчёт — ${esc(monthFor(state.month))}.</div></div>`
+        : `
+    <div class="card recon">
+      <div class="card-head">${icon('receipt')}<h2>Сверка с расчётным листком</h2><span class="muted small head-note">${esc(ps.filename)}</span></div>
+      <div class="recon-summary ${reconBad ? 'bad' : 'good'}">${icon(reconBad ? 'alert' : 'check')}<span>${
+        reconBad
+          ? `Расхождений: ${reconBad} из ${recon.length}. Проверьте отмеченные строки.`
+          : `Все ${recon.length} строк совпадают — начисление верное.`
+      }</span></div>
+      <ul class="recon-list">
+        ${recon
+          .map(
+            (r) => `
+          <li class="${r.ok ? 'ok' : 'bad'}">
+            <span class="recon-label">${esc(r.label)}</span>
+            <span class="recon-vals"><span class="muted small">листок</span> ${money(r.slip)}<br /><span class="muted small">расчёт</span> ${money(r.calc)}</span>
+            <span class="recon-status">${icon(r.ok ? 'check' : 'alert')}${r.ok ? '' : `${r.diff > 0 ? '+' : '−'}${money(Math.abs(r.diff))}`}</span>
+          </li>`,
+          )
+          .join('')}
+      </ul>
+    </div>`
+      : '';
+
   const parts = [
     { key: 'piece', label: 'Сдельная', value: result.piece },
     { key: 'time', label: 'Оклад', value: result.time },
@@ -1017,6 +1214,13 @@ function renderResult() {
         <div><dt>НДФЛ ${num(reg.constants.incomeTaxRate * 100)} %</dt><dd>${ok ? `−${money(result.tax)}` : '—'}</dd></div>
       </dl>
       ${ok ? `<div class="hero-note">в т. ч. ИНПС ${money(result.inps)} сум</div>` : ''}
+      ${
+        ok && recon.length
+          ? `<div class="hero-check ${reconBad ? 'bad' : 'good'}">${icon(reconBad ? 'alert' : 'check')}${
+              reconBad ? `Расхождения с листком: ${reconBad}` : 'Совпадает с расчётным листком'
+            }</div>`
+          : ''
+      }
     </div>
 
     ${incomplete ? `<div class="alert info">${icon('info')}<div>Чтобы посчитать, укажите ${esc(missing.join(', '))}.</div></div>` : ''}
@@ -1053,6 +1257,8 @@ function renderResult() {
         : ''
     }
 
+    ${reconCard}
+
     ${ok && notes.length ? `<ul class="notes">${notes.map((n) => `<li>${icon('info')}<span>${esc(n)}</span></li>`).join('')}</ul>` : ''}
 
     ${
@@ -1070,7 +1276,7 @@ function renderResult() {
     <div class="result-actions">
       <button class="btn primary" data-action="save-history" ${ok ? '' : 'disabled'}>${icon('save')}Сохранить ${esc(monthLabel(state.month, true))}</button>
       <button class="btn" data-action="copy" ${ok ? '' : 'disabled'}>${icon('copy')}Копировать</button>
-      ${CAN_PRINT ? `<button class="btn" data-action="print" ${ok ? '' : 'disabled'}>${icon('printer')}PDF</button>` : ''}
+      ${serverUp || CAN_PRINT ? `<button class="btn" data-action="pdf" ${ok ? '' : 'disabled'}>${icon('download')}PDF</button>` : ''}
     </div>
     <div class="print-only print-meta">
       ${esc(monthLabel(state.month))} · ${esc(profile?.name ?? '')} · ${esc(result.periods.map((_, i) => describePeriod(i)).join('; '))} · CrewPay, Положение ${esc(reg.regulation.code)}
@@ -1078,8 +1284,40 @@ function renderResult() {
   `;
 
   $('[data-action=save-history]', root)?.addEventListener('click', saveToHistory);
-  $('[data-action=print]', root)?.addEventListener('click', () => window.print());
+  $<HTMLButtonElement>('[data-action=pdf]', root)?.addEventListener('click', (e) => downloadReport(e.currentTarget as HTMLButtonElement));
   $('[data-action=copy]', root)?.addEventListener('click', () => copySummary(result, extraLines));
+}
+
+/** Красивый PDF строит сервер; без сервера — печать страницы. */
+async function downloadReport(btn: HTMLButtonElement) {
+  if (!serverUp) return window.print();
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `${icon('refresh', 'icon spin')}PDF`;
+  try {
+    const blob = await api.report({
+      month: state.month,
+      state: { norm: state.norm, periods: state.periods, extras: state.extras, settings: state.settings },
+      payslipId: account ? (state.payslip?.id ?? null) : null,
+      profile: profile
+        ? { name: profile.name, employeeId: profile.employeeId, organization: profile.organization, department: profile.department }
+        : undefined,
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `CrewPay-${state.month}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    toast('PDF готов');
+  } catch (e) {
+    toast(e instanceof ApiError ? e.message : 'Не удалось сформировать PDF');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = label;
+  }
 }
 
 function copySummary(result: MonthResult, extras: { title: string; amount: number }[]) {
@@ -1130,12 +1368,73 @@ async function saveToHistory() {
   if (history.some((h) => h.month === entry.month)) {
     if (!(await ask(`${monthLabel(entry.month)} уже есть в истории. Заменить?`, 'Заменить'))) return;
   }
+  entry.payslipId = state.payslip?.id ?? null;
+  if (account) {
+    try {
+      // Итоги пересчитывает сервер — в истории хранятся проверенные суммы.
+      const r = await api.saveMonth(entry.month, entry.state, entry.payslipId ?? null);
+      Object.assign(entry, { total: r.totals.total, net: r.totals.net, piece: r.totals.piece, time: r.totals.time, extras: r.totals.extras });
+    } catch (e) {
+      return toast(e instanceof ApiError ? e.message : 'Не удалось сохранить в аккаунт');
+    }
+  }
   history = [entry, ...history.filter((h) => h.month !== entry.month)].sort((a, b) => b.month.localeCompare(a.month));
   saveHistory(history);
-  toast(`Сохранено: ${monthLabel(entry.month)}`);
+  toast(account ? `Сохранено в аккаунте: ${monthLabel(entry.month)}` : `Сохранено: ${monthLabel(entry.month)}`);
 }
 
 // ---------- history ----------
+
+async function loadSlips(root: HTMLElement) {
+  const box = $('#slips', root);
+  if (!box) return;
+  try {
+    const { payslips } = await api.payslips();
+    if (!box.isConnected) return;
+    box.innerHTML = `
+      <div class="card-head">${icon('receipt')}<h2>Расчётные листки</h2><span class="muted small head-note">${payslips.length}</span></div>
+      ${
+        payslips.length
+          ? `<ul class="slips">${payslips
+              .map(
+                (p) => `
+            <li>
+              <div class="slip-main">
+                <b>${esc(p.month ? monthLabel(p.month) : 'Без месяца')}</b>
+                <span class="muted small">${esc(p.filename)} · загружен ${esc(new Date(p.createdAt).toLocaleDateString('ru-RU'))}${p.parsed.net !== null ? ` · к выплате ${money(p.parsed.net)}` : ''}</span>
+              </div>
+              <div class="slip-actions">
+                <a class="btn small" href="${api.payslipUrl(p.id)}" target="_blank" rel="noopener">${icon('arrowUpRight')}PDF</a>
+                <button class="btn small ghost danger" data-slip-del="${p.id}" aria-label="Удалить листок">${icon('trash')}</button>
+              </div>
+            </li>`,
+              )
+              .join('')}</ul>`
+          : '<p class="muted small">Загрузите листок на экране «Расчёт» — он появится здесь.</p>'
+      }`;
+    box.querySelectorAll<HTMLButtonElement>('[data-slip-del]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        if (!(await ask('Удалить расчётный листок? Расчёт месяца останется.', 'Удалить', true))) return;
+        try {
+          await api.deletePayslip(b.dataset.slipDel!);
+          if (state.payslip?.id === b.dataset.slipDel) {
+            state.payslip = null;
+            persist();
+          }
+          history.forEach((h) => {
+            if (h.payslipId === b.dataset.slipDel) h.payslipId = null;
+          });
+          saveHistory(history);
+          renderHistory(root);
+        } catch (e) {
+          toast(e instanceof ApiError ? e.message : 'Не удалось удалить');
+        }
+      }),
+    );
+  } catch {
+    box.innerHTML = `<p class="muted small">Не удалось загрузить список листков.</p>`;
+  }
+}
 
 function plural(n: number, one: string, few: string, many: string): string {
   const m10 = n % 10;
@@ -1189,6 +1488,11 @@ function renderHistory(root: HTMLElement) {
               <div class="h-main">
                 <div class="h-month">${esc(monthLabel(h.month))}</div>
                 <div class="muted small">${esc(h.label)}</div>
+                ${
+                  h.payslipId && account
+                    ? `<a class="chip slip-chip" href="${api.payslipUrl(h.payslipId)}" target="_blank" rel="noopener">${icon('receipt')}Расчётный листок</a>`
+                    : ''
+                }
               </div>
               <div class="h-sum">
                 <div class="h-net">${money(h.net)} <span class="cur">сум</span></div>
@@ -1207,9 +1511,11 @@ function renderHistory(root: HTMLElement) {
             })
             .join('')}
         </ul>`
-          : `<div class="empty card">${icon('history', 'icon empty-icon')}<p>Пока пусто. Посчитайте месяц и нажмите «Сохранить».</p><button class="btn primary" data-go="calc">${icon('calc')}К расчёту</button></div>`
+          : `<div class="empty card">${icon('history', 'icon empty-icon')}<p>Пока пусто. Посчитайте месяц или загрузите расчётный листок — и нажмите «Сохранить».</p><button class="btn primary" data-go="calc">${icon('calc')}К расчёту</button></div>`
       }
+      ${account ? `<div class="card" id="slips"><div class="card-head">${icon('receipt')}<h2>Расчётные листки</h2></div><p class="muted small">Загружаю…</p></div>` : ''}
     </section>`;
+  if (account) loadSlips(root);
 
   const openEntry = (h: HistoryEntry) => {
     state = {
@@ -1237,6 +1543,13 @@ function renderHistory(root: HTMLElement) {
     b.addEventListener('click', async () => {
       const h = history[Number(b.dataset.del)];
       if (!(await ask(`Удалить расчёт ${monthFor(h.month)}?`, 'Удалить', true))) return;
+      if (account) {
+        try {
+          await api.deleteMonth(h.month);
+        } catch (e) {
+          return toast(e instanceof ApiError ? e.message : 'Не удалось удалить');
+        }
+      }
       history.splice(Number(b.dataset.del), 1);
       saveHistory(history);
       renderHistory(root);
@@ -1246,6 +1559,8 @@ function renderHistory(root: HTMLElement) {
 }
 
 // ---------- profile ----------
+
+let authMode: 'login' | 'register' = 'login';
 
 function renderProfile(root: HTMLElement) {
   const p: Profile = profile ?? { name: '', email: '', employeeId: '', organization: '', department: '', createdAt: '' };
@@ -1261,15 +1576,53 @@ function renderProfile(root: HTMLElement) {
       <input id="p-${name}" type="${type}" name="${name}" value="${esc(p[name])}" placeholder="${esc(ph)}" autocomplete="off" />
     </div>`;
 
+  const authCard =
+    serverUp && !account
+      ? `
+      <form class="card auth" id="auth-form" novalidate>
+        <div class="segmented" role="tablist">
+          <button type="button" class="seg${authMode === 'login' ? ' active' : ''}" data-auth="login">${icon('user')}<span>Вход</span></button>
+          <button type="button" class="seg${authMode === 'register' ? ' active' : ''}" data-auth="register">${icon('plus')}<span>Регистрация</span></button>
+        </div>
+        <p class="muted small">${
+          authMode === 'login'
+            ? 'Войдите, чтобы загружать расчётные листки и видеть расчёты на любом устройстве.'
+            : 'Аккаунт хранит расчёты и листки в облаке. Нужны только email и пароль.'
+        }</p>
+        ${
+          authMode === 'register'
+            ? `<div class="field"><label class="field-label" for="a-name">${icon('user')}<span>Имя</span></label><input id="a-name" name="name" type="text" autocomplete="name" placeholder="Как к вам обращаться" /></div>`
+            : ''
+        }
+        <div class="field"><label class="field-label" for="a-email">${icon('info')}<span>Email</span></label><input id="a-email" name="email" type="email" autocomplete="email" required placeholder="name@mail.com" value="${esc(profile?.email ?? '')}" /></div>
+        <div class="field"><label class="field-label" for="a-password">${icon('shield')}<span>Пароль</span></label><input id="a-password" name="password" type="password" autocomplete="${authMode === 'login' ? 'current-password' : 'new-password'}" required minlength="8" placeholder="${authMode === 'login' ? '' : 'Минимум 8 символов'}" /></div>
+        <p class="form-error" id="auth-error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">${authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button>
+      </form>`
+      : '';
+  const migrateCard =
+    account && pendingLocal.length
+      ? `
+      <div class="card migrate">
+        <div class="card-head">${icon('upload')}<h2>Перенести в аккаунт</h2></div>
+        <p class="muted small">На этом устройстве есть ${pendingLocal.length} ${plural(pendingLocal.length, 'месяц', 'месяца', 'месяцев')}, которых нет в аккаунте: ${esc(pendingLocal.map((h) => monthLabel(h.month)).join(', '))}.</p>
+        <button class="btn primary" data-action="migrate">${icon('upload')}Перенести</button>
+      </div>`
+      : '';
+
   root.innerHTML = `
     <section class="page">
+      ${authCard}
+      ${migrateCard}
       <div class="profile-head card">
         <div class="avatar big">${p.name ? `<span>${esc(initials(p.name))}</span>` : icon('user')}</div>
         <div class="profile-id">
           <h1>${p.name ? esc(displayName(p.name)) : 'Ваш аккаунт'}</h1>
-          <p class="muted">${p.email ? esc(p.email) : 'Заполните данные из расчётного листка'}</p>
+          <p class="muted">${account ? esc(account.email) : p.email ? esc(p.email) : 'Заполните данные из расчётного листка'}</p>
+          ${account ? `<p class="small account-ok">${icon('shield')}Аккаунт · данные сохраняются в облаке</p>` : ''}
           ${p.organization || p.employeeId ? `<p class="muted small">${esc([p.organization, p.employeeId && `таб. № ${p.employeeId}`].filter(Boolean).join(' · '))}</p>` : ''}
         </div>
+        ${account ? `<button class="btn small ghost logout" data-action="logout">${icon('logout')}Выйти</button>` : ''}
       </div>
 
       <form class="card" id="profile-form" novalidate>
@@ -1297,7 +1650,11 @@ function renderProfile(root: HTMLElement) {
 
       <div class="card">
         <div class="card-head">${icon('shield')}<h2>Хранение и перенос</h2></div>
-        <p class="muted small">Аккаунт хранится только на этом устройстве, без паролей и серверов. Чтобы открыть его на другом телефоне, сохраните копию и загрузите её там.</p>
+        <p class="muted small">${
+          account
+            ? 'Расчёты, листки и оклады хранятся в аккаунте и доступны на любом устройстве после входа. Можно также сохранить копию файлом.'
+            : 'Без входа данные хранятся только на этом устройстве. Чтобы открыть их на другом телефоне, сохраните копию и загрузите её там.'
+        }</p>
         <div class="row-actions">
           ${CAN_DOWNLOAD ? `<button class="btn" data-action="export">${icon('download')}Сохранить копию</button>` : ''}
           <label class="btn file-btn">${icon('upload')}Загрузить копию<input type="file" accept="application/json,.json" id="import-file" hidden /></label>
@@ -1321,10 +1678,84 @@ function renderProfile(root: HTMLElement) {
       $<HTMLInputElement>('#p-email', root)?.focus();
       return;
     }
-    profile = next;
+    profile = { ...next, email: account?.email ?? next.email };
     saveProfile(profile);
+    if (account) api.saveProfile(toServerProfile()).catch(() => toast('Не удалось сохранить в аккаунт'));
     renderShell();
     toast('Профиль сохранён');
+  });
+
+  root.querySelectorAll<HTMLButtonElement>('[data-auth]').forEach((b) =>
+    b.addEventListener('click', () => {
+      authMode = b.dataset.auth as 'login' | 'register';
+      renderProfile(root);
+      $<HTMLInputElement>('#a-email', root)?.focus();
+    }),
+  );
+  $<HTMLFormElement>('#auth-form', root)?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target as HTMLFormElement);
+    const email = String(fd.get('email') ?? '').trim();
+    const password = String(fd.get('password') ?? '');
+    const err = $('#auth-error', root)!;
+    const btn = $<HTMLButtonElement>('#auth-form [type=submit]', root)!;
+    const fail = (msg: string) => {
+      err.textContent = msg;
+      err.hidden = false;
+    };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('Проверьте email.');
+    if (password.length < 8) return fail('Пароль — минимум 8 символов.');
+    btn.disabled = true;
+    try {
+      if (authMode === 'register') await api.register(email, password, String(fd.get('name') ?? '').trim());
+      else await api.login(email, password);
+      await loadAccount();
+      renderShell();
+      toast(authMode === 'register' ? 'Аккаунт создан' : 'Вы вошли');
+    } catch (ex) {
+      btn.disabled = false;
+      if (ex instanceof ApiError && ex.status === 409 && authMode === 'register') {
+        // Такой email уже есть — переключаем на вход и сохраняем введённый адрес.
+        authMode = 'login';
+        renderProfile(root);
+        $<HTMLInputElement>('#a-email', root)!.value = email;
+        $('#auth-error', root)!.textContent = 'Этот email уже зарегистрирован — введите пароль, чтобы войти.';
+        $('#auth-error', root)!.hidden = false;
+        $<HTMLInputElement>('#a-password', root)?.focus();
+        return;
+      }
+      fail(ex instanceof ApiError ? ex.message : 'Сервер недоступен, попробуйте позже.');
+    }
+  });
+  $('[data-action=logout]', root)?.addEventListener('click', async () => {
+    if (!(await ask('Выйти из аккаунта? Данные аккаунта будут удалены с этого устройства (в облаке они сохранятся).', 'Выйти')))
+      return;
+    try {
+      await api.logout();
+    } catch {
+      /* всё равно выходим локально */
+    }
+    account = null;
+    pendingLocal = [];
+    authMode = 'login';
+    applyBackup(makeBackup(null, { ...defaultState(reg), theme: state.theme }, [], {}));
+    toast('Вы вышли');
+  });
+  $('[data-action=migrate]', root)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    let moved = 0;
+    for (const h of pendingLocal) {
+      try {
+        await api.saveMonth(h.month, h.state, null);
+        moved++;
+      } catch {
+        /* месяц с ошибкой пропускаем */
+      }
+    }
+    await loadAccount();
+    renderShell();
+    toast(`Перенесено: ${moved}`);
   });
 
   $('[data-action=export]', root)?.addEventListener('click', () => {
@@ -1513,6 +1944,7 @@ function renderSettings(root: HTMLElement) {
         applyTheme();
       } else (state.settings as unknown as Record<string, string>)[r.name] = r.value;
       persist();
+      syncProfileSoon();
       renderSettings(root);
       toast('Сохранено');
     }),
@@ -1527,6 +1959,90 @@ function renderSettings(root: HTMLElement) {
     applyBackup(makeBackup(null, defaultState(reg), [], {}));
     toast('Данные удалены');
   });
+}
+
+// ---------- облако ----------
+
+/** Месяцы на устройстве, которых нет в аккаунте (после входа предлагаем перенести). */
+let pendingLocal: HistoryEntry[] = [];
+
+function labelFor(periods: AppState['periods']): string {
+  return periods
+    .map((p) => {
+      const pos = findPosition(reg, p.category, p.positionId);
+      const ac = pos?.needsAircraft && p.aircraft >= 0 ? `, ${reg.aircraft[p.aircraft]}` : '';
+      return `${pos?.label ?? ''}${ac}`;
+    })
+    .join(' → ');
+}
+
+function toServerProfile(): ServerProfile {
+  return {
+    name: profile?.name ?? account?.name ?? '',
+    employeeId: profile?.employeeId ?? '',
+    organization: profile?.organization ?? '',
+    department: profile?.department ?? '',
+    salaries,
+    settings: { ...state.settings },
+    theme: state.theme,
+  };
+}
+
+let profileTimer = 0;
+function syncProfileSoon() {
+  if (!account) return;
+  clearTimeout(profileTimer);
+  profileTimer = window.setTimeout(() => api.saveProfile(toServerProfile()).catch(() => {}), 700);
+}
+
+function applyServerProfile(sp: ServerProfile) {
+  if (!account) return;
+  profile = {
+    name: sp.name || profile?.name || account.name || '',
+    email: account.email,
+    employeeId: sp.employeeId || profile?.employeeId || '',
+    organization: sp.organization || profile?.organization || '',
+    department: sp.department || profile?.department || '',
+    createdAt: profile?.createdAt || new Date().toISOString(),
+  };
+  saveProfile(profile);
+  if (sp.salaries) salaries = { ...salaries, ...sp.salaries };
+  saveSalaries(salaries);
+  if (sp.theme) state.theme = sp.theme;
+  if (sp.settings) state.settings = { ...state.settings, ...(sp.settings as Partial<AppState['settings']>) };
+  persist();
+}
+
+async function loadAccount() {
+  try {
+    const me = await api.me();
+    account = me.user;
+    const before = history.slice();
+    applyServerProfile(me.profile);
+    const { months } = await api.months();
+    history = months.map((m) => {
+      const st = m.state as HistoryEntry['state'];
+      return {
+        month: m.month,
+        savedAt: m.updatedAt,
+        total: m.totals.total,
+        net: m.totals.net,
+        piece: m.totals.piece,
+        time: m.totals.time,
+        extras: m.totals.extras,
+        label: labelFor(st.periods),
+        payslipId: m.payslipId,
+        state: st,
+      };
+    });
+    saveHistory(history);
+    pendingLocal = before.filter((h) => !history.some((x) => x.month === h.month));
+    // Новый аккаунт без данных профиля — отправляем то, что уже есть на устройстве.
+    if (!me.profile.employeeId && (profile?.employeeId || Object.keys(salaries).length)) syncProfileSoon();
+  } catch (e) {
+    if (!(e instanceof ApiError && e.status === 401)) console.warn(e);
+    account = null;
+  }
 }
 
 // ---------- boot ----------
@@ -1557,6 +2073,11 @@ async function boot() {
       saveHistory(history);
       saveSalaries(salaries);
     }
+  }
+
+  if (!IS_EMBED) {
+    serverUp = await api.available();
+    if (serverUp) await loadAccount();
   }
 
   applyTheme();

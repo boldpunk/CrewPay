@@ -5,3 +5,6 @@ dist
 dist-embed
 *.seed.json
 accounts/
+dist-server
+.scratch
+.env
