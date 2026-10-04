@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { customType, index, jsonb, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { customType, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => 'bytea',
@@ -10,6 +10,38 @@ export const users = pgTable('users', {
   email: text('email').notNull().unique(),
   passwordHash: text('password_hash').notNull(),
   name: text('name').notNull().default(''),
+  /** Pro действует до этого момента (пробный период или оплата); null — бесплатный план. */
+  proUntil: timestamp('pro_until', { withTimezone: true }),
+  /** trial — пробный период при регистрации, paid — выдано администратором после оплаты. */
+  proSource: text('pro_source'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Заявки на подписку: пользователь выбирает срок, администратор подтверждает после оплаты. */
+export const proRequests = pgTable(
+  'pro_requests',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    months: integer('months').notNull(),
+    note: text('note').notNull().default(''),
+    status: text('status').notNull().default('open'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('pro_requests_status_idx').on(t.status)],
+);
+
+/** Журнал выдачи подписок — кто, кому и на сколько. */
+export const proGrants = pgTable('pro_grants', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  months: integer('months').notNull(),
+  until: timestamp('until', { withTimezone: true }),
+  grantedBy: text('granted_by').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -110,4 +142,23 @@ create table if not exists payslips (
   created_at timestamptz not null default now()
 );
 create index if not exists payslips_user_month_idx on payslips(user_id, month);
+alter table users add column if not exists pro_until timestamptz;
+alter table users add column if not exists pro_source text;
+create table if not exists pro_requests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  months integer not null,
+  note text not null default '',
+  status text not null default 'open',
+  created_at timestamptz not null default now()
+);
+create index if not exists pro_requests_status_idx on pro_requests(status);
+create table if not exists pro_grants (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  months integer not null,
+  until timestamptz,
+  granted_by text not null,
+  created_at timestamptz not null default now()
+);
 `;

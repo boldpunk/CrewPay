@@ -136,12 +136,18 @@ jobs:
             cat > /opt/crewpay/.env <<'ENVEOF'
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             SITE_URL=${{ secrets.SITE_URL }}
+            ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}
+            PRO_PRICE=${{ vars.PRO_PRICE }}
+            PRO_TRIAL_DAYS=${{ vars.PRO_TRIAL_DAYS }}
+            PRO_CONTACT_URL=${{ vars.PRO_CONTACT_URL }}
             ENVEOF
             # Пароль своей базы создаётся один раз и остаётся на сервере (в логи не попадает).
             if [ ! -f /opt/crewpay/db.env ]; then
               umask 077
               echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" > /opt/crewpay/db.env
             fi
+            # Ключ подписи для проверки «не робот» — тоже один раз.
+            grep -q '^CAPTCHA_SECRET=' /opt/crewpay/db.env || (umask 077; echo "CAPTCHA_SECRET=$(openssl rand -hex 32)" >> /opt/crewpay/db.env)
             cat /opt/crewpay/db.env >> /opt/crewpay/.env
             mkdir -p /opt/crewpay/backups
             # Режим «общий Caddy» (сеть другого проекта) — его записал deploy/setup-oracle.sh.

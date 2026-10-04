@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { secureHeaders } from 'hono/secure-headers';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, ilike, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { calculateMonth } from '../src/calc/engine';
 import { type Payslip, parsePayslip, payslipToInput, reconcile } from '../src/calc/payslip';
@@ -21,10 +21,11 @@ import {
   validEmail,
   verifyPassword,
 } from './auth';
+import { Pow } from './captcha';
 import type { DB } from './db';
 import { extractItems } from './pdftext';
 import { renderReport } from './report';
-import { months, payslips, profiles, users } from './schema';
+import { months, payslips, profiles, proGrants, proRequests, users } from './schema';
 
 export interface AppOptions {
   db: DB;
@@ -33,6 +34,30 @@ export interface AppOptions {
   /** Адрес сайта для PDF; по умолчанию — адрес, с которого пришёл запрос. */
   siteUrl?: string;
   secureCookies?: boolean;
+  /** Проверка «не робот» при регистрации. */
+  pow?: Pow;
+  plan?: PlanOptions;
+  /** Регистраций в час с одного IP. */
+  registerLimit?: number;
+}
+
+export interface PlanOptions {
+  /** Пробный Pro при регистрации, дней (0 — без пробного периода). */
+  trialDays?: number;
+  /** Цена Pro за месяц, сум. */
+  price?: number;
+  /** Кто выдаёт подписки (email через запятую в ADMIN_EMAIL). У администратора Pro всегда. */
+  adminEmails?: string[];
+  /** Куда писать об оплате (Telegram, страница оплаты) — показывается в заявке. */
+  contactUrl?: string;
+}
+
+export const PRO_TERMS = [1, 3, 6, 12] as const;
+
+function addMonths(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setMonth(r.getMonth() + n);
+  return r;
 }
 
 type User = NonNullable<Awaited<ReturnType<typeof userBySession>>>;
@@ -102,8 +127,13 @@ function totalsOf(reg: Regulation, month: string, st: z.infer<typeof stateSchema
 export function createApp(opts: AppOptions) {
   const { db } = opts;
   const app = new Hono<Env>();
+  const pow = opts.pow ?? new Pow();
+  const trialDays = opts.plan?.trialDays ?? 7;
+  const admins = new Set((opts.plan?.adminEmails ?? []).map(normalizeEmail).filter(Boolean));
+  const challengeLimiter = new RateLimiter(30, 10 * 60_000);
+  const requestLimiter = new RateLimiter(10, 60 * 60_000);
   const loginLimiter = new RateLimiter(10, 15 * 60_000);
-  const registerLimiter = new RateLimiter(5, 60 * 60_000);
+  const registerLimiter = new RateLimiter(opts.registerLimit ?? 5, 60 * 60_000);
 
   const ip = (c: Context) =>
     c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || 'local';
@@ -140,8 +170,40 @@ export function createApp(opts: AppOptions) {
     return u;
   };
 
+  const planOf = (u: Pick<User, 'email' | 'proUntil' | 'proSource'>) => {
+    const admin = admins.has(u.email);
+    const until = u.proUntil ? new Date(u.proUntil) : null;
+    return {
+      pro: admin || (!!until && until.getTime() > Date.now()),
+      until: admin ? null : (until?.toISOString() ?? null),
+      source: admin ? 'admin' : (u.proSource ?? null),
+      admin,
+    };
+  };
+
+  const requirePro = (c: Context<Env>) => {
+    const u = requireUser(c);
+    if (!planOf(u).pro) throw new HttpError(402, 'Доступно в CrewPay Pro', 'pro');
+    return u;
+  };
+
+  const requireAdmin = (c: Context<Env>) => {
+    const u = requireUser(c);
+    if (!admins.has(u.email)) throw new HttpError(403, 'Только для администратора');
+    return u;
+  };
+
+  const openRequest = async (userId: string) => {
+    const [r] = await db
+      .select({ id: proRequests.id, months: proRequests.months, createdAt: proRequests.createdAt })
+      .from(proRequests)
+      .where(and(eq(proRequests.userId, userId), eq(proRequests.status, 'open')))
+      .limit(1);
+    return r ?? null;
+  };
+
   app.onError((err, c) => {
-    if (err instanceof HttpError) return c.json({ error: err.message }, err.status);
+    if (err instanceof HttpError) return c.json({ error: err.message, ...(err.code ? { code: err.code } : {}) }, err.status);
     if (err instanceof z.ZodError) return c.json({ error: 'Проверьте введённые данные', details: err.issues.slice(0, 5) }, 400);
     console.error(err);
     return c.json({ error: 'Ошибка сервера' }, 500);
@@ -153,9 +215,37 @@ export function createApp(opts: AppOptions) {
 
   const credentials = z.object({ email: z.string(), password: z.string() });
 
+  app.get('/api/auth/challenge', (c) => {
+    if (!challengeLimiter.take(ip(c))) throw new HttpError(429, 'Слишком много запросов, попробуйте позже');
+    c.header('cache-control', 'no-store');
+    return c.json(pow.create());
+  });
+
+  const captchaSchema = z.object({
+    salt: z.string().max(200),
+    number: z.number(),
+    challenge: z.string().max(200),
+    signature: z.string().max(200),
+  });
+
   app.post('/api/auth/register', bodyLimit({ maxSize: 16 * 1024 }), async (c) => {
+    const body = credentials
+      .extend({ name: z.string().max(120).optional(), captcha: captchaSchema.optional(), website: z.string().max(200).optional() })
+      .parse(await c.req.json());
+    // Скрытое поле: человек его не видит, бот заполняет.
+    if (body.website) throw new HttpError(400, 'Запрос отклонён');
+    const verdict = pow.verify(body.captcha);
+    if (verdict !== 'ok')
+      throw new HttpError(
+        400,
+        verdict === 'too-fast'
+          ? 'Слишком быстро — проверьте данные и отправьте ещё раз'
+          : verdict === 'expired'
+            ? 'Проверка устарела — отправьте ещё раз'
+            : 'Проверка «не робот» не пройдена — обновите страницу',
+        'captcha',
+      );
     if (!registerLimiter.take(ip(c))) throw new HttpError(429, 'Слишком много регистраций, попробуйте позже');
-    const body = credentials.extend({ name: z.string().max(120).optional() }).parse(await c.req.json());
     const email = normalizeEmail(body.email);
     if (!validEmail(email)) throw new HttpError(400, 'Проверьте email');
     if (body.password.length < 8) throw new HttpError(400, 'Пароль — минимум 8 символов');
@@ -164,12 +254,18 @@ export function createApp(opts: AppOptions) {
     if (exists.length) throw new HttpError(409, 'Этот email уже зарегистрирован — войдите');
     const [u] = await db
       .insert(users)
-      .values({ email, passwordHash: await hashPassword(body.password), name: (body.name ?? '').trim() })
-      .returning({ id: users.id, email: users.email, name: users.name });
+      .values({
+        email,
+        passwordHash: await hashPassword(body.password),
+        name: (body.name ?? '').trim(),
+        proUntil: trialDays > 0 ? new Date(Date.now() + trialDays * 864e5) : null,
+        proSource: trialDays > 0 ? 'trial' : null,
+      })
+      .returning({ id: users.id, email: users.email, name: users.name, proUntil: users.proUntil, proSource: users.proSource });
     await db.insert(profiles).values({ userId: u.id, data: { name: u.name } });
     const s = await createSession(db, u.id);
     setSession(c, s.token);
-    return c.json({ user: u }, 201);
+    return c.json({ user: { id: u.id, email: u.email, name: u.name }, plan: planOf(u) }, 201);
   });
 
   app.post('/api/auth/login', bodyLimit({ maxSize: 16 * 1024 }), async (c) => {
@@ -184,7 +280,7 @@ export function createApp(opts: AppOptions) {
     loginLimiter.reset(key);
     const s = await createSession(db, u.id);
     setSession(c, s.token);
-    return c.json({ user: { id: u.id, email: u.email, name: u.name } });
+    return c.json({ user: { id: u.id, email: u.email, name: u.name }, plan: planOf(u) });
   });
 
   app.post('/api/auth/logout', async (c) => {
@@ -196,7 +292,90 @@ export function createApp(opts: AppOptions) {
   app.get('/api/me', async (c) => {
     const u = requireUser(c);
     const [p] = await db.select().from(profiles).where(eq(profiles.userId, u.id)).limit(1);
-    return c.json({ user: u, profile: p?.data ?? {} });
+    return c.json({
+      user: { id: u.id, email: u.email, name: u.name, createdAt: u.createdAt },
+      profile: p?.data ?? {},
+      plan: planOf(u),
+      request: await openRequest(u.id),
+    });
+  });
+
+  // ---------- подписка ----------
+
+  app.get('/api/plan', (c) =>
+    c.json({ price: opts.plan?.price ?? 0, trialDays, terms: PRO_TERMS, contactUrl: opts.plan?.contactUrl ?? '' }),
+  );
+
+  app.post('/api/subscription/request', bodyLimit({ maxSize: 8 * 1024 }), async (c) => {
+    const u = requireUser(c);
+    if (!requestLimiter.take(u.id)) throw new HttpError(429, 'Слишком много заявок, попробуйте позже');
+    const body = z
+      .object({ months: z.number().int().refine((m) => (PRO_TERMS as readonly number[]).includes(m)), note: z.string().max(300).default('') })
+      .parse(await c.req.json());
+    const open = await openRequest(u.id);
+    if (open) await db.update(proRequests).set({ months: body.months, note: body.note, createdAt: new Date() }).where(eq(proRequests.id, open.id));
+    else await db.insert(proRequests).values({ userId: u.id, months: body.months, note: body.note });
+    return c.json({ request: await openRequest(u.id) }, open ? 200 : 201);
+  });
+
+  app.delete('/api/subscription/request', async (c) => {
+    const u = requireUser(c);
+    await db
+      .update(proRequests)
+      .set({ status: 'cancelled' })
+      .where(and(eq(proRequests.userId, u.id), eq(proRequests.status, 'open')));
+    return c.json({ ok: true });
+  });
+
+  app.get('/api/admin/subscriptions', async (c) => {
+    requireAdmin(c);
+    const q = (c.req.query('q') ?? '').trim().toLowerCase().slice(0, 100);
+    const requests = await db
+      .select({ id: proRequests.id, months: proRequests.months, note: proRequests.note, createdAt: proRequests.createdAt, email: users.email, name: users.name, proUntil: users.proUntil })
+      .from(proRequests)
+      .innerJoin(users, eq(users.id, proRequests.userId))
+      .where(eq(proRequests.status, 'open'))
+      .orderBy(desc(proRequests.createdAt))
+      .limit(100);
+    const like = `%${q.replace(/[\\%_]/g, (m) => '\\' + m)}%`;
+    const list = await db
+      .select({ email: users.email, name: users.name, proUntil: users.proUntil, proSource: users.proSource, createdAt: users.createdAt })
+      .from(users)
+      .where(q ? or(ilike(users.email, like), ilike(users.name, like)) : undefined)
+      .orderBy(desc(users.createdAt))
+      .limit(50);
+    return c.json({ requests, users: list.map((x) => ({ ...x, plan: planOf(x) })) });
+  });
+
+  app.post('/api/admin/grant', bodyLimit({ maxSize: 8 * 1024 }), async (c) => {
+    const admin = requireAdmin(c);
+    const body = z.object({ email: z.string().max(254), months: z.number().int().min(0).max(36) }).parse(await c.req.json());
+    const [u] = await db
+      .select({ id: users.id, email: users.email, proUntil: users.proUntil, proSource: users.proSource })
+      .from(users)
+      .where(eq(users.email, normalizeEmail(body.email)))
+      .limit(1);
+    if (!u) throw new HttpError(404, 'Пользователь с таким email не найден');
+    // Продлеваем от конца текущей подписки, если она ещё идёт; 0 месяцев — отключить Pro.
+    const from = u.proUntil && u.proUntil.getTime() > Date.now() ? u.proUntil : new Date();
+    const until = body.months > 0 ? addMonths(from, body.months) : null;
+    await db
+      .update(users)
+      .set({ proUntil: until, proSource: until ? 'paid' : null })
+      .where(eq(users.id, u.id));
+    await db.insert(proGrants).values({ userId: u.id, months: body.months, until, grantedBy: admin.email });
+    await db
+      .update(proRequests)
+      .set({ status: body.months > 0 ? 'done' : 'rejected' })
+      .where(and(eq(proRequests.userId, u.id), eq(proRequests.status, 'open')));
+    return c.json({ email: u.email, plan: planOf({ email: u.email, proUntil: until, proSource: until ? 'paid' : null }) });
+  });
+
+  app.post('/api/admin/requests/:id/reject', async (c) => {
+    requireAdmin(c);
+    const id = z.string().uuid().parse(c.req.param('id'));
+    await db.update(proRequests).set({ status: 'rejected' }).where(and(eq(proRequests.id, id), eq(proRequests.status, 'open')));
+    return c.json({ ok: true });
   });
 
   app.put('/api/profile', bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
@@ -253,7 +432,7 @@ export function createApp(opts: AppOptions) {
   // ---------- расчётные листки ----------
 
   app.post('/api/payslips', bodyLimit({ maxSize: MAX_PDF + 64 * 1024 }), async (c) => {
-    const u = requireUser(c);
+    const u = requirePro(c);
     const form = await c.req.formData();
     const file = form.get('file');
     if (!(file instanceof File)) throw new HttpError(400, 'Прикрепите PDF расчётного листка');
@@ -314,7 +493,7 @@ export function createApp(opts: AppOptions) {
   // ---------- PDF-отчёт ----------
 
   app.post('/api/report', bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
-    const u = c.get('user');
+    const u = requirePro(c);
     const body = z
       .object({
         month: monthKey,
@@ -374,7 +553,7 @@ export function createApp(opts: AppOptions) {
 
   // Реконсиляция отдельно — для экрана загрузки (без сохранения).
   app.post('/api/reconcile', bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
-    const u = requireUser(c);
+    const u = requirePro(c);
     const body = z.object({ month: monthKey, state: stateSchema, payslipId: z.string().uuid() }).parse(await c.req.json());
     const [ps] = await db
       .select({ parsed: payslips.parsed })
@@ -394,8 +573,9 @@ export function createApp(opts: AppOptions) {
 
 export class HttpError extends Error {
   constructor(
-    public status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 422 | 429,
+    public status: 400 | 401 | 402 | 403 | 404 | 409 | 413 | 415 | 422 | 429,
     message: string,
+    public code?: string,
   ) {
     super(message);
   }

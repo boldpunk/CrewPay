@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import regJson from '../public/regulation.json';
 import { createApp } from '../server/app';
+import { Pow, solve } from '../server/captcha';
 import { connect, migrate, needsTls } from '../server/db';
 import { extractItems } from '../server/pdftext';
 import { parsePayslip, payslipToInput } from '../src/calc/payslip';
@@ -70,7 +71,14 @@ describe('Парсер расчётного листка (синтетическ
 
 describe.skipIf(!URL_)('API (Postgres)', () => {
   const { db, pool } = connect(URL_ ?? 'postgres://x@localhost/x');
-  const app = createApp({ db, regulation: async () => reg, siteUrl: 'https://crewpay.test' });
+  const app = createApp({
+    db,
+    regulation: async () => reg,
+    siteUrl: 'https://crewpay.test',
+    pow: new Pow({ max: 2000, minMs: 0 }),
+    registerLimit: 100,
+    plan: { trialDays: 7, price: 29000, adminEmails: ['admin@example.com'] },
+  });
   let cookie = '';
 
   const call = (path: string, init: RequestInit & { json?: unknown } = {}) => {
@@ -82,6 +90,12 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
       init.body = JSON.stringify(init.json);
     }
     return app.request(path, { ...init, headers });
+  };
+
+  /** Регистрация как в браузере: задача → перебор → отправка. */
+  const register = async (json: Record<string, unknown>) => {
+    const ch = await (await call('/api/auth/challenge')).json();
+    return call('/api/auth/register', { method: 'POST', json: { ...json, captcha: solve(ch) } });
   };
 
   const state = {
@@ -110,7 +124,7 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
   };
 
   beforeAll(async () => {
-    await pool.query('drop table if exists payslips, months, profiles, sessions, users cascade');
+    await pool.query('drop table if exists pro_grants, pro_requests, payslips, months, profiles, sessions, users cascade');
     await migrate(pool);
   });
   afterAll(async () => {
@@ -123,18 +137,15 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
   });
 
   it('регистрация, вход, профиль', async () => {
-    const weak = await call('/api/auth/register', { method: 'POST', json: { email: 'a@b.uz', password: '123' } });
+    const weak = await register({ email: 'a@b.uz', password: '123' });
     expect(weak.status).toBe(400);
 
-    const r = await call('/api/auth/register', {
-      method: 'POST',
-      json: { email: ' Test@Example.com ', password: 'correct horse', name: 'Test' },
-    });
+    const r = await register({ email: ' Test@Example.com ', password: 'correct horse', name: 'Test' });
     expect(r.status).toBe(201);
     cookie = r.headers.get('set-cookie')!.split(';')[0];
     expect(r.headers.get('set-cookie')).toMatch(/HttpOnly/i);
 
-    const dup = await call('/api/auth/register', { method: 'POST', json: { email: 'test@example.com', password: 'another pass' } });
+    const dup = await register({ email: 'test@example.com', password: 'another pass' });
     expect(dup.status).toBe(409);
 
     const me = await call('/api/me');
@@ -242,9 +253,101 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
 
   it('чужие данные недоступны', async () => {
     cookie = '';
-    const r = await call('/api/auth/register', { method: 'POST', json: { email: 'other@example.com', password: 'other password' } });
+    const r = await register({ email: 'other@example.com', password: 'other password' });
     cookie = r.headers.get('set-cookie')!.split(';')[0];
     expect((await call(`/api/payslips/${payslipId}/file`)).status).toBe(404);
     expect((await (await call('/api/months')).json()).months).toHaveLength(0);
+  });
+
+  it('защита от ботов: без решения, повтор, скрытое поле', async () => {
+    cookie = '';
+    const none = await call('/api/auth/register', { method: 'POST', json: { email: 'bot1@example.com', password: 'password1' } });
+    expect(none.status).toBe(400);
+    expect((await none.json()).code).toBe('captcha');
+
+    const ch = await (await call('/api/auth/challenge')).json();
+    const sol = solve(ch);
+    const wrong = await call('/api/auth/register', {
+      method: 'POST',
+      json: { email: 'bot2@example.com', password: 'password1', captcha: { ...sol, number: (sol.number + 1) % 2001 } },
+    });
+    expect(wrong.status).toBe(400);
+    const forged = await call('/api/auth/register', {
+      method: 'POST',
+      json: { email: 'bot2@example.com', password: 'password1', captcha: { ...sol, salt: sol.salt.replace(/\.\d+$/, '.0') } },
+    });
+    expect(forged.status).toBe(400);
+
+    const honeypot = await call('/api/auth/register', {
+      method: 'POST',
+      json: { email: 'bot3@example.com', password: 'password1', captcha: sol, website: 'http://spam' },
+    });
+    expect(honeypot.status).toBe(400);
+
+    const first = await call('/api/auth/register', { method: 'POST', json: { email: 'human@example.com', password: 'password1', captcha: sol } });
+    expect(first.status).toBe(201);
+    const replay = await call('/api/auth/register', { method: 'POST', json: { email: 'human2@example.com', password: 'password1', captcha: sol } });
+    expect(replay.status).toBe(400);
+
+    // Слишком быстрая отправка формы.
+    const slow = new Pow({ max: 50, minMs: 60_000 });
+    expect(slow.verify(solve(slow.create()))).toBe('too-fast');
+    const old = new Pow({ max: 50, minMs: 0, ttlMs: 1000 });
+    expect(old.verify(solve(old.create(Date.now() - 5000)))).toBe('expired');
+  });
+
+  it('подписка: пробный период, блокировка Pro-функций, заявка и выдача администратором', async () => {
+    cookie = '';
+    const r = await register({ email: 'pilot@example.com', password: 'password1' });
+    expect((await r.json()).plan).toMatchObject({ pro: true, source: 'trial', admin: false });
+    cookie = r.headers.get('set-cookie')!.split(';')[0];
+
+    // Пробный период закончился.
+    await pool.query(`update users set pro_until = now() - interval '1 day' where email = 'pilot@example.com'`);
+    const me = await (await call('/api/me')).json();
+    expect(me.plan.pro).toBe(false);
+    const fd = new FormData();
+    fd.set('file', new File([Buffer.from(await fakePayslipPdf())], 'x.pdf', { type: 'application/pdf' }));
+    const locked = await call('/api/payslips', { method: 'POST', body: fd });
+    expect(locked.status).toBe(402);
+    expect((await locked.json()).code).toBe('pro');
+    expect((await call('/api/report', { method: 'POST', json: { month: '2026-08', state } })).status).toBe(402);
+    // Бесплатное остаётся бесплатным.
+    expect((await call('/api/months/2026-08', { method: 'PUT', json: { state } })).status).toBe(200);
+
+    expect((await call('/api/subscription/request', { method: 'POST', json: { months: 5 } })).status).toBe(400);
+    const req = await call('/api/subscription/request', { method: 'POST', json: { months: 3, note: 'Telegram @pilot' } });
+    expect(req.status).toBe(201);
+    expect((await (await call('/api/me')).json()).request.months).toBe(3);
+    expect((await call('/api/admin/subscriptions')).status).toBe(403);
+    expect((await call('/api/admin/grant', { method: 'POST', json: { email: 'pilot@example.com', months: 12 } })).status).toBe(403);
+    const pilotCookie = cookie;
+
+    cookie = '';
+    const a = await register({ email: 'admin@example.com', password: 'password1' });
+    expect((await a.json()).plan).toMatchObject({ pro: true, admin: true });
+    cookie = a.headers.get('set-cookie')!.split(';')[0];
+    const list = await (await call('/api/admin/subscriptions')).json();
+    expect(list.requests).toHaveLength(1);
+    expect(list.requests[0]).toMatchObject({ email: 'pilot@example.com', months: 3, note: 'Telegram @pilot' });
+    const found = await (await call('/api/admin/subscriptions?q=pilot')).json();
+    expect(found.users.map((u: { email: string }) => u.email)).toEqual(['pilot@example.com']);
+    expect((await call('/api/admin/grant', { method: 'POST', json: { email: 'nobody@example.com', months: 1 } })).status).toBe(404);
+    const g = await (await call('/api/admin/grant', { method: 'POST', json: { email: 'pilot@example.com', months: 3 } })).json();
+    expect(g.plan).toMatchObject({ pro: true, source: 'paid' });
+    expect((await (await call('/api/admin/subscriptions')).json()).requests).toHaveLength(0);
+
+    cookie = pilotCookie;
+    const after = await (await call('/api/me')).json();
+    expect(after.plan.pro).toBe(true);
+    expect(after.request).toBeNull();
+    const until = new Date(after.plan.until).getTime();
+    expect(until).toBeGreaterThan(Date.now() + 85 * 864e5);
+    expect((await call('/api/report', { method: 'POST', json: { month: '2026-08', state } })).status).toBe(200);
+
+    cookie = a.headers.get('set-cookie')!.split(';')[0];
+    await call('/api/admin/grant', { method: 'POST', json: { email: 'pilot@example.com', months: 0 } });
+    cookie = pilotCookie;
+    expect((await (await call('/api/me')).json()).plan.pro).toBe(false);
   });
 });

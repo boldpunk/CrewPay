@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Regulation } from '../src/calc/types';
 import { createApp } from './app';
 import { purgeExpiredSessions } from './auth';
+import { Pow } from './captcha';
 import { connect, migrate } from './db';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -35,6 +36,14 @@ const app = createApp({
   regulation,
   siteUrl: process.env.SITE_URL,
   secureCookies: process.env.NODE_ENV === 'production',
+  // Без CAPTCHA_SECRET ключ создаётся при запуске: после перезапуска старые задачи просто устареют.
+  pow: new Pow({ secret: process.env.CAPTCHA_SECRET || undefined }),
+  plan: {
+    trialDays: Number(process.env.PRO_TRIAL_DAYS || 7),
+    price: Number(process.env.PRO_PRICE || 29000),
+    adminEmails: (process.env.ADMIN_EMAIL ?? '').split(','),
+    contactUrl: process.env.PRO_CONTACT_URL ?? '',
+  },
 });
 
 app.get('/regulation.json', async (c) => {

@@ -19,6 +19,8 @@ const P: Record<string, string> = {
   wallet: '<path d="M20 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/><path d="M16.5 14h.01"/>',
   sparkle: '<path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15v4M17 17h4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  crown: '<path d="m2.5 7.5 4.8 4 4.7-7 4.7 7 4.8-4-2 11.5h-15z"/><path d="M5 21.5h14"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/>',
   download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',

@@ -3042,3 +3042,274 @@ input[type='password']:focus {
     display: none;
   }
 }
+
+/* ---------- подписка ---------- */
+
+.pro-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 6px;
+  border-radius: 999px;
+  background: var(--signal-soft);
+  color: var(--signal);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.pro-tag .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.pro-tag.big {
+  font-size: 0.8rem;
+  padding: 4px 12px 4px 9px;
+  align-self: flex-start;
+}
+
+.pro-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-color: var(--signal);
+  background: linear-gradient(160deg, var(--signal-soft), var(--surface) 55%);
+}
+
+.pro-gate h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+}
+
+.pro-gate p {
+  margin: 0;
+}
+
+.pro-features,
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pro-features li,
+.plan-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.4;
+}
+
+.pro-features .icon,
+.plan-list .icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--primary);
+}
+
+.plans {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 16px;
+}
+
+.plan-card h2 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+}
+
+.plan-card.pro {
+  border-color: var(--signal);
+}
+
+.plan-card.pro h2 > .icon {
+  color: var(--signal);
+}
+
+.plan-price {
+  margin-left: auto;
+  font-size: 1rem;
+  color: var(--signal);
+}
+
+.plan-price span {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-weight: 500;
+}
+
+.plan-now {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.plan-now.ok {
+  color: var(--ok);
+}
+
+.plan-now .muted {
+  font-weight: 500;
+}
+
+.plan-link .plan-state {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.terms {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.term input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.term-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.term-box span {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.term input:checked + .term-box {
+  border-color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.term input:focus-visible + .term-box {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.admin-grant {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.admin-grant input,
+.admin-grant select,
+.admin-search {
+  min-width: 0;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+}
+
+.admin-search {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.admin-h {
+  margin: 18px 0 8px;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.admin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.admin-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+/* Скрытое поле-ловушка для ботов: людям не видно, читалкам экрана — тоже. */
+.hp {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.pow-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--muted);
+}
+
+.pow-status[data-state='done'] {
+  color: var(--ok);
+}
+
+.pow-status .icon {
+  width: 16px;
+  height: 16px;
+}
+
+@media (max-width: 720px) {
+  .plans {
+    grid-template-columns: 1fr;
+  }
+  .terms {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .admin-grant {
+    grid-template-columns: 1fr 1fr;
+  }
+  .admin-grant input {
+    grid-column: 1 / -1;
+  }
+  .admin-list li {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

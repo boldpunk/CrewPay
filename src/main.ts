@@ -14,7 +14,7 @@ import {
   summarizeFlights,
   validRoute,
 } from './calc/flights';
-import { type Account, ApiError, type ServerProfile, type UploadedPayslip, api } from './api';
+import { type Account, ApiError, type ServerProfile, type UploadedPayslip, api, type Plan, type PlanInfo, type ProRequest } from './api';
 import type { Category, MonthResult, Regulation, ResolvedPosition } from './calc/types';
 import {
   type AppState,
@@ -40,8 +40,9 @@ import {
   toMonthInput,
 } from './state';
 import { icon, logoMark } from './ui/icons';
+import { type PowChallenge, type PowSolution, solvePow } from './pow';
 
-type View = 'calc' | 'flights' | 'history' | 'reference' | 'profile' | 'settings';
+type View = 'calc' | 'flights' | 'history' | 'reference' | 'profile' | 'settings' | 'pro';
 
 /** Сборка для предпросмотра во встроенном окне (claude.ai): там нет печати, скачивания файлов и service worker. */
 const IS_EMBED = import.meta.env.VITE_TARGET === 'embed';
@@ -60,6 +61,36 @@ let lastResult: MonthResult | null = null;
 /** Сервер доступен (на статическом хостинге и в предпросмотре — нет). */
 let serverUp = false;
 let account: Account | null = null;
+/** Подписка текущего аккаунта. */
+let plan: Plan | null = null;
+let proRequest: ProRequest | null = null;
+let planInfo: PlanInfo | null = null;
+
+const PLAN_KEY = 'crewpay.plan';
+
+/**
+ * Pro-функции: журнал рейсов, загрузка листков, PDF-отчёт.
+ * Без сервера (предпросмотр) всё открыто; офлайн — по последнему известному плану аккаунта.
+ */
+function isPro(): boolean {
+  if (serverUp) return !!plan?.pro;
+  if (IS_EMBED) return true;
+  try {
+    const p = JSON.parse(localStorage.getItem(PLAN_KEY) ?? 'null') as Plan | null;
+    return !!p && (p.admin || (!!p.until && new Date(p.until).getTime() > Date.now()));
+  } catch {
+    return false;
+  }
+}
+
+function rememberPlan() {
+  try {
+    if (plan) localStorage.setItem(PLAN_KEY, JSON.stringify(plan));
+    else localStorage.removeItem(PLAN_KEY);
+  } catch {
+    /* хранилище недоступно */
+  }
+}
 
 const app = document.getElementById('app')!;
 
@@ -280,7 +311,7 @@ function renderShell() {
     <nav class="tabbar" aria-label="Разделы">
       ${MOBILE_TABS.map(
         ([id, label, ic]) =>
-          `<button class="tab${view === id || (id === 'profile' && view === 'settings') ? ' active' : ''}" data-view="${id}" ${view === id ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></button>`,
+          `<button class="tab${view === id || (id === 'profile' && (view === 'settings' || view === 'pro')) ? ' active' : ''}" data-view="${id}" ${view === id ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></button>`,
       ).join('')}
     </nav>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -304,6 +335,7 @@ function renderView() {
   else if (view === 'reference') renderReference(root);
   else if (view === 'history') renderHistory(root);
   else if (view === 'profile') renderProfile(root);
+  else if (view === 'pro') renderPro(root);
   else renderSettings(root);
 }
 
@@ -614,6 +646,16 @@ function uploadCard(): string {
       </div>
       <button class="btn primary small" data-go="profile">${icon('user')}Войти</button>
     </div>`;
+  if (!isPro())
+    return `
+    <div class="card upload upload-guest">
+      <div class="upload-icon">${icon('receipt')}</div>
+      <div class="upload-text">
+        <b>Загрузка расчётного листка ${proTag()}</b>
+        <span class="muted small">PDF из 1С — месяц, часы и суммы заполнятся сами, каждая строка будет сверена.</span>
+      </div>
+      <button class="btn primary small" data-pro>${icon('crown')}Оформить</button>
+    </div>`;
   const ps = state.payslip;
   return `
     <div class="card upload" id="upload">
@@ -710,6 +752,7 @@ async function handleUpload(root: HTMLElement, file: File) {
   } catch (e) {
     zone?.classList.remove('busy');
     if (title) title.textContent = 'Загрузить расчётный листок';
+    if (proExpired(e)) return;
     toast(e instanceof ApiError ? e.message : 'Не удалось загрузить файл');
   }
 }
@@ -1322,7 +1365,13 @@ function renderResult() {
     <div class="result-actions">
       <button class="btn primary" data-action="save-history" ${ok ? '' : 'disabled'}>${icon('save')}Сохранить ${esc(monthLabel(state.month, true))}</button>
       <button class="btn" data-action="copy" ${ok ? '' : 'disabled'}>${icon('copy')}Копировать</button>
-      ${serverUp || CAN_PRINT ? `<button class="btn" data-action="pdf" ${ok ? '' : 'disabled'}>${icon('download')}PDF</button>` : ''}
+      ${
+        serverUp && !isPro()
+          ? `<button class="btn" data-pro title="PDF-отчёт — в CrewPay Pro">${icon('lock')}PDF</button>`
+          : serverUp || CAN_PRINT
+            ? `<button class="btn" data-action="pdf" ${ok ? '' : 'disabled'}>${icon('download')}PDF</button>`
+            : ''
+      }
     </div>
     <div class="print-only print-meta">
       ${esc(monthLabel(state.month))} · ${esc(profile?.name ?? '')} · ${esc(result.periods.map((_, i) => describePeriod(i)).join('; '))} · CrewPay
@@ -1359,6 +1408,7 @@ async function downloadReport(btn: HTMLButtonElement) {
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
     toast('PDF готов');
   } catch (e) {
+    if (proExpired(e)) return;
     toast(e instanceof ApiError ? e.message : 'Не удалось сформировать PDF');
   } finally {
     btn.disabled = false;
@@ -1753,6 +1803,23 @@ function bindNewFlight(root: HTMLElement) {
 
 function renderFlights(root: HTMLElement) {
   document.body.classList.remove('typing');
+  if (!isPro()) {
+    const n = state.periods.reduce((s, x) => s + x.flights.length, 0);
+    root.innerHTML = `
+      <section class="page flights-page">
+        <div class="page-head">
+          <h1>Рейсы</h1>
+          <p class="muted">Вводите каждый рейс — налёт, ночные и праздничные часы месяца посчитаются сами и попадут в расчёт.</p>
+        </div>
+        ${proGate(
+          'Журнал рейсов — в CrewPay Pro',
+          n
+            ? `Ваши ${n} ${plural(n, 'рейс сохранён', 'рейса сохранены', 'рейсов сохранены')} — журнал откроется после оформления Pro.`
+            : 'Например, TAS-DXB: 6:00 полётного, 3:02 ночных, 9:42 рабочего — CrewPay сложит месяц до минуты, отметит праздники и Dead Head.',
+        )}
+      </section>`;
+    return;
+  }
   const p = period();
   const t = summarizeFlights(reg, state.month, p.flights);
   const order = [...p.flights].sort((a, b) => a.date.localeCompare(b.date));
@@ -2148,6 +2215,352 @@ function renderHistory(root: HTMLElement) {
 
 // ---------- profile ----------
 
+// ---------- подписка ----------
+
+const PRO_FEATURES: [string, string, string][] = [
+  ['plane', 'Журнал рейсов', 'каждый рейс отдельно — налёт, ночные, праздничные часы и Dead Head считаются сами до минуты'],
+  ['receipt', 'Расчётные листки', 'загрузите PDF — месяц, часы и суммы заполнятся сами, каждая строка будет сверена'],
+  ['download', 'PDF-отчёт', 'оформленный расчёт с формулами и сверкой — сохранить или отправить'],
+];
+const FREE_FEATURES = ['Калькулятор налёта и зарплаты', 'История месяцев в облаке', 'Справочник ставок'];
+
+const proTag = () => `<span class="pro-tag">${icon('crown')}Pro</span>`;
+
+const fmtDay = (iso: string) => new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+const daysLeft = (iso: string) => Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 864e5));
+
+function planLabel(): string {
+  if (!account) return 'Войдите';
+  if (plan?.admin) return 'Pro · администратор';
+  if (plan?.pro && plan.until) {
+    const d = daysLeft(plan.until);
+    return plan.source === 'trial' ? `Пробный · ${d} ${plural(d, 'день', 'дня', 'дней')}` : `Pro до ${fmtDay(plan.until)}`;
+  }
+  return 'Бесплатный';
+}
+
+function proGate(title: string, text: string): string {
+  const days = planInfo?.trialDays ?? 0;
+  const cta = !account
+    ? `<button class="btn primary" data-pro-register>${icon('sparkle')}${
+        days ? `Попробовать ${days} ${plural(days, 'день', 'дня', 'дней')} бесплатно` : 'Зарегистрироваться'
+      }</button>
+       <button class="btn ghost" data-pro-login>${icon('user')}Войти</button>`
+    : `<button class="btn primary" data-pro>${icon('crown')}Оформить Pro</button>`;
+  return `
+    <div class="card pro-gate">
+      <span class="pro-tag big">${icon('crown')}CrewPay Pro</span>
+      <h2>${esc(title)}</h2>
+      <p class="muted">${esc(text)}</p>
+      <ul class="pro-features">
+        ${PRO_FEATURES.map(([ic, t, d]) => `<li>${icon(ic)}<span><b>${t}</b> — ${d}</span></li>`).join('')}
+      </ul>
+      <div class="row-actions">${cta}</div>
+    </div>`;
+}
+
+/** Сервер ответил «нужен Pro» (подписка закончилась, пока страница была открыта). */
+function proExpired(e: unknown): boolean {
+  if (!(e instanceof ApiError && e.status === 402)) return false;
+  if (plan) plan = { ...plan, pro: false };
+  toast('Подписка закончилась — продлите Pro');
+  go('pro');
+  return true;
+}
+
+// Проверка «не робот»: начинается, как только открыта форма регистрации.
+let powJob: { promise: Promise<PowSolution>; ctrl: AbortController; issuedAt: number; state: 'work' | 'done' | 'error' } | null = null;
+
+function powStatusHtml(): string {
+  const st = powJob?.state ?? 'work';
+  if (st === 'done') return `${icon('shield')}<span>Проверка «не робот» пройдена</span>`;
+  if (st === 'error') return `${icon('alert')}<span>Проверка не удалась — обновите страницу</span>`;
+  return `${icon('refresh', 'icon spin')}<span>Проверяем, что вы не робот…</span>`;
+}
+
+function updatePowStatus() {
+  const el = $('#pow-status');
+  if (el) {
+    el.innerHTML = powStatusHtml();
+    el.dataset.state = powJob?.state ?? 'work';
+  }
+}
+
+function startPow() {
+  if (powJob && powJob.state !== 'error') return powJob;
+  const ctrl = new AbortController();
+  const job = { ctrl, issuedAt: Date.now(), state: 'work' as 'work' | 'done' | 'error', promise: null as unknown as Promise<PowSolution> };
+  job.promise = api.challenge().then((c: PowChallenge) => {
+    job.issuedAt = Date.now();
+    return solvePow(c, ctrl.signal);
+  });
+  job.promise.then(
+    () => {
+      job.state = 'done';
+      if (powJob === job) updatePowStatus();
+    },
+    () => {
+      job.state = 'error';
+      if (powJob === job) updatePowStatus();
+    },
+  );
+  powJob = job;
+  updatePowStatus();
+  return job;
+}
+
+function resetPow() {
+  powJob?.ctrl.abort();
+  powJob = null;
+}
+
+/** Сервер не принимает форму быстрее 3 секунд после выдачи задачи — человек так не успевает, менеджер паролей может. */
+const MIN_FORM_MS = 3300;
+
+async function registerWithPow(body: { email: string; password: string; name: string; website: string }, retry = true): Promise<void> {
+  const job = startPow();
+  const captcha = await job.promise;
+  const wait = job.issuedAt + MIN_FORM_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  powJob = null; // решение одноразовое
+  try {
+    await api.register({ ...body, captcha });
+  } catch (e) {
+    // Задача устарела (вкладка была открыта долго) — одна попытка с новой.
+    if (retry && e instanceof ApiError && e.code === 'captcha' && !body.website) return registerWithPow(body, false);
+    throw e;
+  }
+}
+
+let adminQuery = '';
+
+function renderPro(root: HTMLElement) {
+  if (serverUp && !planInfo)
+    api
+      .planInfo()
+      .then((i) => {
+        planInfo = i;
+        if (view === 'pro') renderPro($('#view')!);
+      })
+      .catch(() => {});
+  const info = planInfo ?? { price: 0, trialDays: 0, terms: [1, 3, 6, 12], contactUrl: '' };
+  const price = (m: number) => (info.price ? `${num(info.price * m)} сум` : '');
+
+  let status: string;
+  if (!serverUp) status = `<p class="muted">Подписка оформляется на сайте, когда есть интернет.</p>`;
+  else if (!account)
+    status = `<p class="muted">Войдите или зарегистрируйтесь${
+      info.trialDays ? ` — первые ${info.trialDays} ${plural(info.trialDays, 'день', 'дня', 'дней')} Pro бесплатно` : ''
+    }.</p>
+      <div class="row-actions">
+        <button class="btn primary" data-pro-register>${icon('sparkle')}Регистрация</button>
+        <button class="btn ghost" data-pro-login>${icon('user')}Войти</button>
+      </div>`;
+  else if (plan?.admin) status = `<p class="plan-now ok">${icon('shield')}Администратор · Pro без ограничений</p>`;
+  else if (plan?.pro && plan.until)
+    status = `<p class="plan-now ok">${icon('check')}${
+      plan.source === 'trial'
+        ? `Пробный период · осталось ${daysLeft(plan.until)} ${plural(daysLeft(plan.until), 'день', 'дня', 'дней')}`
+        : 'Pro активен'
+    } <span class="muted">до ${fmtDay(plan.until)}</span></p>`;
+  else
+    status = `<p class="plan-now">${icon('info')}Бесплатный план${
+      plan?.until ? ` <span class="muted">Pro закончился ${fmtDay(plan.until)}</span>` : ''
+    }</p>`;
+
+  const terms = info.terms.length ? info.terms : [1, 3, 6, 12];
+  const requestCard =
+    account && !plan?.admin
+      ? proRequest
+        ? `
+      <div class="card">
+        <div class="card-head">${icon('clock')}<h2>Заявка отправлена</h2></div>
+        <p>Pro на ${proRequest.months} ${plural(proRequest.months, 'месяц', 'месяца', 'месяцев')}${
+          info.price ? ` · <b>${price(proRequest.months)}</b>` : ''
+        } · ${fmtDay(proRequest.createdAt)}</p>
+        <p class="muted small">Мы свяжемся с вами для оплаты${
+          info.contactUrl ? ' или напишите сами' : ''
+        }. После оплаты Pro включится в аккаунте — обновите страницу.</p>
+        <div class="row-actions">
+          ${info.contactUrl ? `<a class="btn primary" href="${esc(info.contactUrl)}" target="_blank" rel="noopener">${icon('arrowUpRight')}Написать об оплате</a>` : ''}
+          <button class="btn ghost danger" data-action="cancel-request">${icon('x')}Отменить заявку</button>
+        </div>
+      </div>`
+        : `
+      <form class="card" id="pro-form">
+        <div class="card-head">${icon('crown')}<h2>${plan?.pro ? 'Продлить Pro' : 'Оформить Pro'}</h2></div>
+        <div class="terms" role="radiogroup" aria-label="Срок">
+          ${terms
+            .map(
+              (m, i) => `
+            <label class="term">
+              <input type="radio" name="months" value="${m}" ${i === 0 ? 'checked' : ''} />
+              <span class="term-box"><b>${m} ${plural(m, 'месяц', 'месяца', 'месяцев')}</b>${info.price ? `<span>${price(m)}</span>` : ''}</span>
+            </label>`,
+            )
+            .join('')}
+        </div>
+        <div class="field">
+          <label class="field-label" for="pro-note">${icon('info')}<span>Как с вами связаться</span></label>
+          <input id="pro-note" name="note" type="text" maxlength="300" placeholder="Telegram или телефон" autocomplete="tel" />
+          <span class="field-hint">Пришлём реквизиты для оплаты. После оплаты Pro включится в аккаунте.</span>
+        </div>
+        <div class="form-actions"><button class="btn primary" type="submit">${icon('crown')}Отправить заявку</button></div>
+      </form>`
+      : '';
+
+  const adminCard = plan?.admin
+    ? `
+      <div class="card" id="admin-card">
+        <div class="card-head">${icon('shield')}<h2>Подписки · администратор</h2></div>
+        <form class="admin-grant" id="grant-form">
+          <input name="email" type="email" required placeholder="email пользователя" aria-label="Email" />
+          <select name="months" aria-label="Срок">
+            ${[1, 3, 6, 12].map((m) => `<option value="${m}">+${m} мес.</option>`).join('')}
+            <option value="0">Отключить Pro</option>
+          </select>
+          <button class="btn primary" type="submit">Применить</button>
+        </form>
+        <div id="admin-body"><p class="muted small">Загружаю…</p></div>
+      </div>`
+    : '';
+
+  root.innerHTML = `
+    <section class="page pro-page">
+      <div class="page-head">
+        <h1>Подписка</h1>
+        ${status}
+      </div>
+      <div class="plans">
+        <div class="card plan-card">
+          <h2>Бесплатно</h2>
+          <ul class="plan-list">${FREE_FEATURES.map((f) => `<li>${icon('check')}${f}</li>`).join('')}</ul>
+        </div>
+        <div class="card plan-card pro">
+          <h2>${icon('crown')}Pro${info.price ? ` <span class="plan-price">${num(info.price)} сум<span>/мес</span></span>` : ''}</h2>
+          <ul class="plan-list">
+            <li>${icon('check')}Всё бесплатное</li>
+            ${PRO_FEATURES.map(([ic, t, d]) => `<li>${icon(ic)}<span><b>${t}</b> — ${d}</span></li>`).join('')}
+          </ul>
+        </div>
+      </div>
+      ${requestCard}
+      ${adminCard}
+    </section>`;
+
+  $<HTMLFormElement>('#pro-form', root)?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target as HTMLFormElement);
+    const btn = $<HTMLButtonElement>('#pro-form [type=submit]', root)!;
+    btn.disabled = true;
+    try {
+      proRequest = (await api.requestPro(Number(fd.get('months')), String(fd.get('note') ?? '').trim())).request;
+      toast('Заявка отправлена');
+      renderPro(root);
+    } catch (ex) {
+      btn.disabled = false;
+      toast(ex instanceof ApiError ? ex.message : 'Сервер недоступен');
+    }
+  });
+  $('[data-action=cancel-request]', root)?.addEventListener('click', async () => {
+    if (!(await ask('Отменить заявку на Pro?', 'Отменить заявку', true))) return;
+    try {
+      await api.cancelProRequest();
+      proRequest = null;
+      renderPro(root);
+    } catch (ex) {
+      toast(ex instanceof ApiError ? ex.message : 'Сервер недоступен');
+    }
+  });
+  if (plan?.admin) bindAdmin(root);
+}
+
+function bindAdmin(root: HTMLElement) {
+  const body = $('#admin-body', root)!;
+  const grant = async (email: string, months: number) => {
+    try {
+      const r = await api.adminGrant(email, months);
+      toast(months ? `${r.email}: Pro до ${fmtDay(r.plan.until!)}` : `${r.email}: Pro отключён`);
+      if (account && r.email === account.email) await loadAccount();
+      load();
+    } catch (ex) {
+      toast(ex instanceof ApiError ? ex.message : 'Сервер недоступен');
+    }
+  };
+  const load = async () => {
+    try {
+      const { requests, users } = await api.adminSubscriptions(adminQuery);
+      body.innerHTML = `
+        <h3 class="admin-h">Заявки${requests.length ? ` · ${requests.length}` : ''}</h3>
+        ${
+          requests.length
+            ? `<ul class="admin-list">${requests
+                .map(
+                  (r) => `
+              <li>
+                <div><b>${esc(r.email)}</b>${r.name ? ` · ${esc(r.name)}` : ''}<br />
+                  <span class="muted small">${r.months} мес. · ${fmtDay(r.createdAt)}${r.note ? ` · ${esc(r.note)}` : ''}</span></div>
+                <div class="admin-actions">
+                  <button class="btn small primary" data-grant="${esc(r.email)}" data-months="${r.months}">Выдать ${r.months} мес.</button>
+                  <button class="btn small ghost" data-reject="${r.id}">Отклонить</button>
+                </div>
+              </li>`,
+                )
+                .join('')}</ul>`
+            : '<p class="muted small">Новых заявок нет.</p>'
+        }
+        <h3 class="admin-h">Пользователи</h3>
+        <input class="admin-search" id="admin-q" type="search" placeholder="Поиск по email или имени" value="${esc(adminQuery)}" />
+        <ul class="admin-list">${users
+          .map(
+            (u) => `
+          <li>
+            <div><b>${esc(u.email)}</b>${u.name ? ` · ${esc(u.name)}` : ''}<br />
+              <span class="muted small">${
+                u.plan.admin
+                  ? 'администратор'
+                  : u.plan.pro && u.plan.until
+                    ? `${u.plan.source === 'trial' ? 'пробный' : 'Pro'} до ${fmtDay(u.plan.until)}`
+                    : 'бесплатный'
+              } · с ${fmtDay(u.createdAt)}</span></div>
+          </li>`,
+          )
+          .join('')}</ul>`;
+      body.querySelectorAll<HTMLButtonElement>('[data-grant]').forEach((b) =>
+        b.addEventListener('click', () => grant(b.dataset.grant!, Number(b.dataset.months))),
+      );
+      body.querySelectorAll<HTMLButtonElement>('[data-reject]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          await api.adminReject(b.dataset.reject!).catch(() => toast('Сервер недоступен'));
+          load();
+        }),
+      );
+      let t = 0;
+      $<HTMLInputElement>('#admin-q', body)!.addEventListener('input', (e) => {
+        adminQuery = (e.target as HTMLInputElement).value;
+        clearTimeout(t);
+        t = window.setTimeout(async () => {
+          await load();
+          const q = $<HTMLInputElement>('#admin-q', body);
+          q?.focus();
+          q?.setSelectionRange(q.value.length, q.value.length);
+        }, 350);
+      });
+    } catch (ex) {
+      body.innerHTML = `<p class="form-error">${esc(ex instanceof ApiError ? ex.message : 'Сервер недоступен')}</p>`;
+    }
+  };
+  $<HTMLFormElement>('#grant-form', root)!.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target as HTMLFormElement);
+    const months = Number(fd.get('months'));
+    const email = String(fd.get('email') ?? '').trim();
+    if (!months && !(await ask(`Отключить Pro у ${email}?`, 'Отключить', true))) return;
+    await grant(email, months);
+  });
+  load();
+}
+
 let authMode: 'login' | 'register' = 'login';
 
 function renderProfile(root: HTMLElement) {
@@ -2175,7 +2588,9 @@ function renderProfile(root: HTMLElement) {
         <p class="muted small">${
           authMode === 'login'
             ? 'Войдите, чтобы загружать расчётные листки и видеть расчёты на любом устройстве.'
-            : 'Аккаунт хранит расчёты и листки в облаке. Нужны только email и пароль.'
+            : `Аккаунт хранит расчёты и листки в облаке. Нужны только email и пароль.${
+                (planInfo?.trialDays ?? 0) > 0 ? ` Первые ${planInfo!.trialDays} ${plural(planInfo!.trialDays, 'день', 'дня', 'дней')} — Pro бесплатно.` : ''
+              }`
         }</p>
         ${
           authMode === 'register'
@@ -2184,6 +2599,12 @@ function renderProfile(root: HTMLElement) {
         }
         <div class="field"><label class="field-label" for="a-email">${icon('info')}<span>Email</span></label><input id="a-email" name="email" type="email" autocomplete="email" required placeholder="name@mail.com" value="${esc(profile?.email ?? '')}" /></div>
         <div class="field"><label class="field-label" for="a-password">${icon('shield')}<span>Пароль</span></label><input id="a-password" name="password" type="password" autocomplete="${authMode === 'login' ? 'current-password' : 'new-password'}" required minlength="8" placeholder="${authMode === 'login' ? '' : 'Минимум 8 символов'}" /></div>
+        ${
+          authMode === 'register'
+            ? `<div class="hp" aria-hidden="true"><label>Сайт <input name="website" type="text" tabindex="-1" autocomplete="off" /></label></div>
+               <p class="pow-status small" id="pow-status">${powStatusHtml()}</p>`
+            : ''
+        }
         <p class="form-error" id="auth-error" role="alert" hidden></p>
         <button class="btn primary" type="submit">${authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button>
       </form>`
@@ -2236,6 +2657,11 @@ function renderProfile(root: HTMLElement) {
         }
       </div>
 
+      ${
+        serverUp
+          ? `<button class="card to-calc plan-link" data-pro><span>${icon('crown')}<span>Подписка</span></span><b class="plan-state">${esc(planLabel())}</b>${icon('chevron', 'icon rot-90')}</button>`
+          : ''
+      }
       <button class="card to-calc" data-goto="settings"><span>${icon('sliders')}<span>Настройки</span></span>${icon('chevron', 'icon rot-90')}</button>
 
       <div class="card">
@@ -2276,9 +2702,11 @@ function renderProfile(root: HTMLElement) {
   });
 
   $('[data-goto=settings]', root)?.addEventListener('click', () => go('settings'));
+  if (serverUp && !account && authMode === 'register') startPow();
   root.querySelectorAll<HTMLButtonElement>('[data-auth]').forEach((b) =>
     b.addEventListener('click', () => {
       authMode = b.dataset.auth as 'login' | 'register';
+      if (authMode === 'login') resetPow();
       renderProfile(root);
       $<HTMLInputElement>('#a-email', root)?.focus();
     }),
@@ -2298,16 +2726,22 @@ function renderProfile(root: HTMLElement) {
     if (password.length < 8) return fail('Пароль — минимум 8 символов.');
     btn.disabled = true;
     try {
-      if (authMode === 'register') await api.register(email, password, String(fd.get('name') ?? '').trim());
-      else await api.login(email, password);
+      if (authMode === 'register') {
+        btn.textContent = 'Проверка…';
+        await registerWithPow({ email, password, name: String(fd.get('name') ?? '').trim(), website: String(fd.get('website') ?? '') });
+      } else await api.login(email, password);
       await loadAccount();
       renderShell();
       toast(authMode === 'register' ? 'Аккаунт создан' : 'Вы вошли');
     } catch (ex) {
       btn.disabled = false;
+      btn.textContent = authMode === 'login' ? 'Войти' : 'Создать аккаунт';
+      // Решение одноразовое — для следующей попытки готовим новое.
+      if (authMode === 'register') startPow();
       if (ex instanceof ApiError && ex.status === 409 && authMode === 'register') {
         // Такой email уже есть — переключаем на вход и сохраняем введённый адрес.
         authMode = 'login';
+        resetPow();
         renderProfile(root);
         $<HTMLInputElement>('#a-email', root)!.value = email;
         $('#auth-error', root)!.textContent = 'Этот email уже зарегистрирован — введите пароль, чтобы войти.';
@@ -2315,7 +2749,7 @@ function renderProfile(root: HTMLElement) {
         $<HTMLInputElement>('#a-password', root)?.focus();
         return;
       }
-      fail(ex instanceof ApiError ? ex.message : 'Сервер недоступен, попробуйте позже.');
+      fail(ex instanceof ApiError ? ex.message : ex instanceof Error ? ex.message : 'Сервер недоступен, попробуйте позже.');
     }
   });
   $('[data-action=logout]', root)?.addEventListener('click', async () => {
@@ -2327,6 +2761,9 @@ function renderProfile(root: HTMLElement) {
       /* всё равно выходим локально */
     }
     account = null;
+    plan = null;
+    proRequest = null;
+    rememberPlan();
     pendingLocal = [];
     authMode = 'login';
     applyBackup(makeBackup(null, { ...defaultState(reg), theme: state.theme }, [], {}));
@@ -2607,6 +3044,9 @@ async function loadAccount() {
   try {
     const me = await api.me();
     account = me.user;
+    plan = me.plan;
+    proRequest = me.request;
+    rememberPlan();
     const before = history.slice();
     applyServerProfile(me.profile);
     const { months } = await api.months();
@@ -2632,6 +3072,9 @@ async function loadAccount() {
   } catch (e) {
     if (!(e instanceof ApiError && e.status === 401)) console.warn(e);
     account = null;
+    plan = null;
+    proRequest = null;
+    if (e instanceof ApiError && e.status === 401) rememberPlan();
   }
 }
 
@@ -2667,8 +3110,22 @@ async function boot() {
 
   if (!IS_EMBED) {
     serverUp = await api.available();
-    if (serverUp) await loadAccount();
+    if (serverUp) {
+      await loadAccount();
+      api.planInfo().then((i) => (planInfo = i)).catch(() => {});
+    }
   }
+
+  // Кнопки «Pro» есть на разных страницах — один обработчик на всё приложение.
+  app.addEventListener('click', (e) => {
+    const t = (e.target as HTMLElement).closest<HTMLElement>('[data-pro], [data-pro-register], [data-pro-login]');
+    if (!t) return;
+    e.preventDefault();
+    if (t.hasAttribute('data-pro')) return go('pro');
+    authMode = t.hasAttribute('data-pro-register') ? 'register' : 'login';
+    go('profile');
+    $<HTMLInputElement>('#a-email')?.focus();
+  });
 
   applyTheme();
   renderShell();
