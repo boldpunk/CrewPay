@@ -84,9 +84,13 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
 | `DATABASE_URL` | строка подключения Neon (`postgresql://…neon.tech/…?sslmode=require`) |
 | `SITE_URL` | `https://crewpay.uz` |
 
-**4. nginx и HTTPS** на сервере — готовый файл [`deploy/nginx-crewpay.uz.conf`](deploy/nginx-crewpay.uz.conf)
-(проксирует на `127.0.0.1:3020`), затем `certbot --nginx -d crewpay.uz -d www.crewpay.uz`.
-HTTPS обязателен: cookie входа выдаётся только по HTTPS, и без него не установится PWA.
+**4. Сервер (Oracle Cloud, Ampere A1 / ARM).** Образ собирается для x86 и ARM. Один раз:
+- Oracle Console → Networking → Virtual Cloud Networks → VCN сервера → Security Lists → Default →
+  Add Ingress Rules: `0.0.0.0/0`, TCP, порт **80**, и такое же правило для **443**.
+- По SSH на сервере: `curl -fsSL https://raw.githubusercontent.com/boldpunk/CrewPay/main/deploy/setup-oracle.sh | bash -s -- ваш@email`
+  — ставит Docker, nginx, certbot, открывает порты в файрволе самого сервера (iptables/firewalld),
+  настраивает crewpay.uz → `127.0.0.1:3020`, выпускает HTTPS-сертификат и печатает значения секретов
+  (`SSH_HOST`, `SSH_USER`, отдельный ключ для `SSH_PRIVATE_KEY`).
 
 **5.** Actions → CI & Deploy → Run workflow (или любой push в `main`). Проверка: `https://crewpay.uz/api/health` → `{"ok":true}`.
 

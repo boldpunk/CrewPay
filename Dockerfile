@@ -1,5 +1,6 @@
 # --- сборка ---
-FROM node:22-slim AS build
+# Сборка (vite, esbuild) идёт на платформе раннера — результат одинаков для x86 и ARM.
+FROM --platform=$BUILDPLATFORM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
