@@ -13,6 +13,8 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 sites() { grep -E '^[^#[:space:]][^{]*\{[[:space:]]*$' | sed 's/[[:space:]]*{[[:space:]]*$//' | tr ', ' '\n\n' | grep -v '^$' | sort -u; }
+# Admin API: в busybox localhost может означать ::1, а Caddy слушает 127.0.0.1.
+live_config() { docker exec "$EDGE" sh -c 'wget -qO- http://127.0.0.1:2019/config/ 2>/dev/null || wget -qO- http://localhost:2019/config/'; }
 probe() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$1/" || true; }
 
 # Какой файл Caddy читает при старте.
@@ -40,7 +42,7 @@ else
 fi
 
 # Действующие сайты — из admin API (то, что реально обслуживается сейчас).
-docker exec "$EDGE" wget -qO- http://localhost:2019/config/ > "$WORK/live.json"
+live_config > "$WORK/live.json" || true
 [ -s "$WORK/live.json" ] || { echo "Не удалось прочитать действующую конфигурацию — перезапуск отменён"; exit 1; }
 docker cp "$WORK/live.json" "$EDGE:/tmp/caddy-live-backup.json"
 grep -o '"host":\[[^]]*\]' "$WORK/live.json" | grep -o '"[^"]*"' | grep -v '"host"' | tr -d '"' | sort -u > "$WORK/live_sites"
@@ -62,7 +64,7 @@ echo "== до перезапуска"; cat "$WORK/before"
 docker restart "$EDGE" >/dev/null
 echo "Перезапущен, жду готовности…"
 for _ in $(seq 1 30); do
-  docker exec "$EDGE" wget -qO- http://localhost:2019/config/ >/dev/null 2>&1 && break
+  live_config >/dev/null 2>&1 && break
   sleep 2
 done
 sleep 5
