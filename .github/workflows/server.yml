@@ -58,12 +58,16 @@ jobs:
                 [ -d /opt/crewpay ] && (cd /opt/crewpay && docker compose ps 2>/dev/null) || echo "/opt/crewpay ещё нет"
                 echo "== приложение"; curl -fsS --max-time 5 http://127.0.0.1:3020/api/health || echo "не отвечает на 127.0.0.1:3020"
                 echo; echo "== подписка"; curl -fsS --max-time 5 http://127.0.0.1:3020/api/plan || echo "нет /api/plan"
-                echo; [ -f /opt/crewpay/.env ] && for k in ADMIN_EMAIL CAPTCHA_SECRET; do grep -q "^$k=." /opt/crewpay/.env && echo "$k задан" || echo "$k НЕ задан"; done
+                echo; [ -f /opt/crewpay/.env ] && for k in ADMIN_EMAIL CAPTCHA_SECRET PAYME_MERCHANT_ID PAYME_KEY CLICK_SERVICE_ID CLICK_MERCHANT_ID CLICK_SECRET_KEY; do grep -q "^$k=." /opt/crewpay/.env && echo "$k задан" || echo "$k НЕ задан"; done
                 echo "== 80/443";  docker ps --filter publish=443 --format '{{.Names}} ({{.Image}})' 2>/dev/null || true
                 command -v nginx >/dev/null && (sudo nginx -t 2>&1 | tail -1) || echo "nginx на хосте нет"
                 [ -f /opt/crewpay/edge.env ] && grep EDGE_NETWORK /opt/crewpay/edge.env || true
                 echo "== сертификат"; echo | openssl s_client -connect crewpay.uz:443 -servername crewpay.uz 2>/dev/null | openssl x509 -noout -subject -enddate 2>/dev/null || echo "HTTPS для crewpay.uz пока нет"
                 echo "== снаружи"
+                echo "== превью и оплата"
+                curl -sS -o /dev/null -w "https://crewpay.uz/og.png → %{http_code} %{content_type}\n" --max-time 10 https://crewpay.uz/og.png || true
+                curl -sS --max-time 10 -X POST -H 'content-type: application/json' -d '{"id":1,"method":"CheckTransaction","params":{"id":"x"}}' https://crewpay.uz/payments/payme | grep -o '"code":-[0-9]*' | sed 's/^/payme endpoint → /' || true
+                curl -sS --max-time 10 -X POST -d 'action=0' https://crewpay.uz/payments/click/prepare | grep -o '"error":-[0-9]*' | sed 's/^/click endpoint → /' || true
                 for site in crewpay.uz www.crewpay.uz boldpunk.uz fyndue.uz; do
                   curl -sS -o /dev/null -w "https://$site → %{http_code}\n" --max-time 10 "https://$site/" || echo "https://$site недоступен"
                 done

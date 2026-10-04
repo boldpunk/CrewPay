@@ -140,6 +140,12 @@ jobs:
             PRO_PRICE=${{ vars.PRO_PRICE }}
             PRO_TRIAL_DAYS=${{ vars.PRO_TRIAL_DAYS }}
             PRO_CONTACT_URL=${{ vars.PRO_CONTACT_URL }}
+            PAYME_MERCHANT_ID=${{ vars.PAYME_MERCHANT_ID }}
+            PAYME_KEY=${{ secrets.PAYME_KEY }}
+            PAYME_TEST=${{ vars.PAYME_TEST }}
+            CLICK_SERVICE_ID=${{ vars.CLICK_SERVICE_ID }}
+            CLICK_MERCHANT_ID=${{ vars.CLICK_MERCHANT_ID }}
+            CLICK_SECRET_KEY=${{ secrets.CLICK_SECRET_KEY }}
             ENVEOF
             # Пароль своей базы создаётся один раз и остаётся на сервере (в логи не попадает).
             if [ ! -f /opt/crewpay/db.env ]; then

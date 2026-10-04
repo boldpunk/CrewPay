@@ -46,7 +46,34 @@
   от конца текущей подписки, «Отключить Pro» — снимает. Все выдачи пишутся в таблицу `pro_grants`.
 - Загрузку листков, сверку и PDF сервер отдаёт только с активным Pro (ответ 402); журнал рейсов закрыт в интерфейсе,
   а уже введённые рейсы сохраняются и открываются после продления.
-- Онлайн-оплату (Payme, Click) можно подключить позже: она будет вызывать ту же выдачу, что и кнопка администратора.
+- **Онлайн-оплата Payme и Click**: пользователь выбирает срок и нажимает «Оплатить через Payme / Click»; создаётся
+  заказ (номер с 1001), открывается страница платёжной системы, после оплаты она сама вызывает сервер и Pro продлевается.
+  Вернувшись на сайт (`/?paid=<номер>`), пользователь видит «Проверяем оплату…» → «Оплата получена».
+  Пока ни одна касса не подключена, работает заявка с ручной выдачей.
+
+### Подключение Payme (Merchant API)
+
+1. В кабинете business.paycom.uz создайте кассу, в настройках укажите:
+   - **Endpoint URL:** `https://crewpay.uz/payments/payme`
+   - **Поле счёта (account):** `order_id` — «Номер заказа», тип число.
+2. GitHub → Settings → Secrets and variables → Actions:
+   - секрет `PAYME_KEY` — ключ кассы (сначала тестовый ключ из test.paycom.uz);
+   - переменная `PAYME_MERCHANT_ID` — ID кассы;
+   - переменная `PAYME_TEST` = `1`, пока проходите проверку в песочнице test.paycom.uz; затем удалите её и замените `PAYME_KEY` на боевой ключ.
+3. Перезапустите деплой. Реализованы все методы: CheckPerformTransaction, CreateTransaction, PerformTransaction,
+   CancelTransaction (до оплаты — отмена заказа, после — возврат и снятие месяцев), CheckTransaction, GetStatement,
+   ChangePassword (новый ключ сохраняется в базе). Транзакции старше 12 часов отменяются с причиной 4.
+
+### Подключение Click (SHOP API)
+
+1. В кабинете merchant.click.uz для сервиса укажите:
+   - **Prepare URL:** `https://crewpay.uz/payments/click/prepare`
+   - **Complete URL:** `https://crewpay.uz/payments/click/complete`
+2. Переменные `CLICK_SERVICE_ID`, `CLICK_MERCHANT_ID` и секрет `CLICK_SECRET_KEY` (SECRET_KEY сервиса).
+3. Перезапустите деплой. Подпись `sign_string` (md5) проверяется в каждом запросе; повторная оплата заказа → `-4`,
+   неуспешное списание (Complete с `error < 0`) отменяет заказ → `-9`.
+
+Обе системы отвечают только на правильный ключ/подпись. Все выдачи Pro пишутся в `pro_grants` (`payme #1001`, `click #1002`).
 
 ## Защита регистрации от ботов
 
@@ -90,6 +117,9 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
 | `PRO_TRIAL_DAYS` | нет | Пробный период, дней (по умолчанию 7, `0` — без пробного) |
 | `PRO_CONTACT_URL` | нет | Ссылка «Написать об оплате» в заявке (например, Telegram) |
 | `CAPTCHA_SECRET` | нет | Ключ подписи проверки «не робот»; без него создаётся при запуске |
+| `PAYME_MERCHANT_ID`, `PAYME_KEY` | для Payme | ID кассы (переменная) и ключ (секрет) |
+| `PAYME_TEST` | нет | `1` — тестовая касса checkout.test.paycom.uz |
+| `CLICK_SERVICE_ID`, `CLICK_MERCHANT_ID`, `CLICK_SECRET_KEY` | для Click | Данные сервиса Click (ключ — секрет) |
 
 ## Деплой на crewpay.uz (как molly.uz)
 
@@ -127,6 +157,9 @@ CrewPay встаёт рядом так же, как Fyndue: контейнер �
 **5.** Actions → CI & Deploy → Run workflow (или любой push в `main`). Проверка: `https://crewpay.uz/api/health` → `{"ok":true}`.
 
 Справочник ставок можно вынести на сервер (`REGULATION_PATH`, см. `docker-compose.yml`) и править без релиза.
+
+**Превью ссылок** (Telegram, WhatsApp, Instagram, Facebook, X): мета-теги Open Graph в `index.html`, картинка
+`public/og.png` 1200×630 — исходник `scripts/og/og.html`, пересборка `node scripts/og/build.mjs` (нужен Playwright).
 
 `npm run build:embed` собирает статический предпросмотр одним файлом (без сервера; `SEED=файл.json` встраивает аккаунт).
 

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import regJson from '../public/regulation.json';
 import { createApp } from '../server/app';
 import { Pow, solve } from '../server/captcha';
+import { createHash } from 'node:crypto';
 import { connect, migrate, needsTls } from '../server/db';
 import { extractItems } from '../server/pdftext';
 import { parsePayslip, payslipToInput } from '../src/calc/payslip';
@@ -78,6 +79,10 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     pow: new Pow({ max: 2000, minMs: 0 }),
     registerLimit: 100,
     plan: { trialDays: 7, price: 29000, adminEmails: ['admin@example.com'] },
+    payments: {
+      payme: { merchantId: 'merchant-1', key: 'payme-key' },
+      click: { serviceId: '111', merchantId: '222', secretKey: 'click-secret' },
+    },
   });
   let cookie = '';
 
@@ -124,7 +129,7 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
   };
 
   beforeAll(async () => {
-    await pool.query('drop table if exists pro_grants, pro_requests, payslips, months, profiles, sessions, users cascade');
+    await pool.query('drop table if exists app_settings, click_transactions, payme_transactions, orders, pro_grants, pro_requests, payslips, months, profiles, sessions, users cascade');
     await migrate(pool);
   });
   afterAll(async () => {
@@ -349,5 +354,153 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     await call('/api/admin/grant', { method: 'POST', json: { email: 'pilot@example.com', months: 0 } });
     cookie = pilotCookie;
     expect((await (await call('/api/me')).json()).plan.pro).toBe(false);
+  });
+  // ---------- оплата ----------
+
+  let payKey = 'payme-key';
+  const payme = async (method: string, params: Record<string, unknown>, key = payKey) => {
+    const r = await app.request('/payments/payme', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`Paycom:${key}`).toString('base64')}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 7, method, params }),
+    });
+    expect(r.status).toBe(200);
+    return (await r.json()) as { id: number; result: any; error?: { code: number; message: { ru: string } } };
+  };
+  const md5 = (x: string) => createHash('md5').update(x).digest('hex');
+  const click = async (step: 'prepare' | 'complete', f: Record<string, string>, secret = 'click-secret') => {
+    const action = step === 'prepare' ? '0' : '1';
+    const base: Record<string, string> = { service_id: '111', click_paydoc_id: '9', action, sign_time: '2026-10-04 12:00:00', error: '0', error_note: 'Success', ...f };
+    const sign = md5(
+      base.click_trans_id + base.service_id + secret + base.merchant_trans_id + (step === 'complete' ? base.merchant_prepare_id : '') + base.amount + action + base.sign_time,
+    );
+    const r = await app.request(`/payments/click/${step}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ ...base, sign_string: sign }).toString(),
+    });
+    return r.json();
+  };
+  const planNow = async () => (await (await call('/api/me')).json()).plan;
+
+  it('Payme: заказ, создание, оплата, проверка, выписка, возврат', async () => {
+    cookie = '';
+    const r = await register({ email: 'payer@example.com', password: 'password1' });
+    cookie = r.headers.get('set-cookie')!.split(';')[0];
+    await pool.query(`update users set pro_until = null, pro_source = null where email = 'payer@example.com'`);
+
+    const info = await (await call('/api/plan')).json();
+    expect(info.providers).toEqual(['payme', 'click']);
+    expect((await call('/api/pay/checkout', { method: 'POST', json: { provider: 'payme', months: 5 } })).status).toBe(400);
+    const co = await (await call('/api/pay/checkout', { method: 'POST', json: { provider: 'payme', months: 3 } })).json();
+    expect(co.url).toMatch(/^https:\/\/checkout\.paycom\.uz\//);
+    const decoded = Buffer.from(co.url.split('/').pop(), 'base64').toString();
+    expect(decoded).toBe(`m=merchant-1;ac.order_id=${co.orderId};a=8700000;c=https://crewpay.test/?paid=${co.orderId};l=ru`);
+    const order = co.orderId as number;
+    const account = { order_id: String(order) };
+
+    expect((await payme('CheckPerformTransaction', { amount: 8_700_000, account }, 'wrong')).error!.code).toBe(-32504);
+    expect((await payme('CheckPerformTransaction', { amount: 100, account })).error!.code).toBe(-31001);
+    const unknown = await payme('CheckPerformTransaction', { amount: 8_700_000, account: { order_id: '999999' } });
+    expect(unknown.error!.code).toBe(-31050);
+    expect(unknown.error!.message.ru).toBeTruthy();
+    expect(unknown.id).toBe(7);
+    expect((await payme('CheckPerformTransaction', { amount: 8_700_000, account })).result).toEqual({ allow: true });
+
+    const time = Date.now();
+    const c1 = await payme('CreateTransaction', { id: 'pay-1', time, amount: 8_700_000, account });
+    expect(c1.result.state).toBe(1);
+    const again = await payme('CreateTransaction', { id: 'pay-1', time, amount: 8_700_000, account });
+    expect(again.result).toEqual(c1.result);
+    expect((await payme('CreateTransaction', { id: 'pay-2', time, amount: 8_700_000, account })).error!.code).toBe(-31050);
+    expect((await payme('CheckPerformTransaction', { amount: 8_700_000, account })).error!.code).toBe(-31008);
+    expect((await planNow()).pro).toBe(false);
+
+    const perf = await payme('PerformTransaction', { id: 'pay-1' });
+    expect(perf.result.state).toBe(2);
+    expect((await payme('PerformTransaction', { id: 'pay-1' })).result).toEqual(perf.result);
+    const plan = await planNow();
+    expect(plan).toMatchObject({ pro: true, source: 'paid' });
+    expect(new Date(plan.until).getTime()).toBeGreaterThan(Date.now() + 85 * 864e5);
+    expect((await (await call(`/api/pay/orders/${order}`)).json()).order.status).toBe('paid');
+
+    const check = await payme('CheckTransaction', { id: 'pay-1' });
+    expect(check.result).toMatchObject({ state: 2, perform_time: perf.result.perform_time, cancel_time: 0, reason: null });
+    const st = await payme('GetStatement', { from: time - 1000, to: time + 1000 });
+    expect(st.result.transactions).toHaveLength(1);
+    expect(st.result.transactions[0]).toMatchObject({ id: 'pay-1', amount: 8_700_000, account, state: 2 });
+
+    const cancel = await payme('CancelTransaction', { id: 'pay-1', reason: 5 });
+    expect(cancel.result.state).toBe(-2);
+    expect((await payme('CancelTransaction', { id: 'pay-1', reason: 5 })).result).toEqual(cancel.result);
+    expect((await planNow()).pro).toBe(false);
+    expect((await payme('CheckTransaction', { id: 'pay-1' })).result).toMatchObject({ state: -2, reason: 5 });
+
+    expect((await payme('PerformTransaction', { id: 'nope' })).error!.code).toBe(-31003);
+    expect((await payme('Unknown', {})).error!.code).toBe(-32601);
+  });
+
+  it('Payme: отмена по таймауту 12 часов, отмена до оплаты, смена ключа', async () => {
+    const co = await (await call('/api/pay/checkout', { method: 'POST', json: { provider: 'payme', months: 1 } })).json();
+    const account = { order_id: String(co.orderId) };
+    await payme('CreateTransaction', { id: 'pay-3', time: Date.now(), amount: 2_900_000, account });
+    await pool.query(`update payme_transactions set create_time = create_time - 43300000 where payme_id = 'pay-3'`);
+    expect((await payme('PerformTransaction', { id: 'pay-3' })).error!.code).toBe(-31008);
+    expect((await payme('CheckTransaction', { id: 'pay-3' })).result).toMatchObject({ state: -1, reason: 4 });
+    expect((await planNow()).pro).toBe(false);
+
+    const co2 = await (await call('/api/pay/checkout', { method: 'POST', json: { provider: 'payme', months: 1 } })).json();
+    await payme('CreateTransaction', { id: 'pay-4', time: Date.now(), amount: 2_900_000, account: { order_id: String(co2.orderId) } });
+    expect((await payme('CancelTransaction', { id: 'pay-4', reason: 3 })).result.state).toBe(-1);
+    expect((await (await call(`/api/pay/orders/${co2.orderId}`)).json()).order.status).toBe('cancelled');
+
+    expect((await payme('ChangePassword', { password: 'new-key' })).result).toEqual({ success: true });
+    expect((await payme('CheckTransaction', { id: 'pay-4' })).error!.code).toBe(-32504);
+    payKey = 'new-key';
+    expect((await payme('CheckTransaction', { id: 'pay-4' })).result.state).toBe(-1);
+  });
+
+  it('Click: подпись, сумма, prepare → complete, отмена, повторная оплата', async () => {
+    const co = await (await call('/api/pay/checkout', { method: 'POST', json: { provider: 'click', months: 1 } })).json();
+    expect(co.url).toContain('https://my.click.uz/services/pay?service_id=111&merchant_id=222&amount=29000');
+    const tr = String(co.orderId);
+
+    expect((await click('prepare', { click_trans_id: '5001', merchant_trans_id: tr, amount: '29000.00' }, 'bad')).error).toBe(-1);
+    expect((await click('prepare', { click_trans_id: '5001', merchant_trans_id: tr, amount: '100' })).error).toBe(-2);
+    expect((await click('prepare', { click_trans_id: '5001', merchant_trans_id: '999999', amount: '29000' })).error).toBe(-5);
+    const prep = await click('prepare', { click_trans_id: '5001', merchant_trans_id: tr, amount: '29000.00' });
+    expect(prep).toMatchObject({ error: 0, click_trans_id: 5001, merchant_trans_id: tr });
+    expect(prep.merchant_prepare_id).toBeGreaterThan(0);
+
+    expect(
+      (await click('complete', { click_trans_id: '5001', merchant_trans_id: tr, merchant_prepare_id: '999', amount: '29000.00' })).error,
+    ).toBe(-6);
+    const done = await click('complete', { click_trans_id: '5001', merchant_trans_id: tr, merchant_prepare_id: String(prep.merchant_prepare_id), amount: '29000.00' });
+    expect(done).toMatchObject({ error: 0, merchant_confirm_id: prep.merchant_prepare_id });
+    expect((await planNow()).pro).toBe(true);
+    const twice = await click('complete', { click_trans_id: '5001', merchant_trans_id: tr, merchant_prepare_id: String(prep.merchant_prepare_id), amount: '29000.00' });
+    expect(twice.error).toBe(-4);
+    expect((await click('prepare', { click_trans_id: '5002', merchant_trans_id: tr, amount: '29000' })).error).toBe(-4);
+
+    // Списание не прошло — Click присылает complete с ошибкой.
+    const co2 = await (await call('/api/pay/checkout', { method: 'POST', json: { provider: 'click', months: 1 } })).json();
+    const p2 = await click('prepare', { click_trans_id: '5003', merchant_trans_id: String(co2.orderId), amount: '29000' });
+    const failed = await click('complete', {
+      click_trans_id: '5003',
+      merchant_trans_id: String(co2.orderId),
+      merchant_prepare_id: String(p2.merchant_prepare_id),
+      amount: '29000',
+      error: '-5017',
+    });
+    expect(failed.error).toBe(-9);
+    expect((await (await call(`/api/pay/orders/${co2.orderId}`)).json()).order.status).toBe('cancelled');
+
+    // Чужой заказ не виден.
+    const other = cookie;
+    cookie = '';
+    const r = await register({ email: 'stranger@example.com', password: 'password1' });
+    cookie = r.headers.get('set-cookie')!.split(';')[0];
+    expect((await call(`/api/pay/orders/${co.orderId}`)).status).toBe(404);
+    cookie = other;
   });
 });

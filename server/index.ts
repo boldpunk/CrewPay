@@ -38,6 +38,21 @@ const app = createApp({
   secureCookies: process.env.NODE_ENV === 'production',
   // Без CAPTCHA_SECRET ключ создаётся при запуске: после перезапуска старые задачи просто устареют.
   pow: new Pow({ secret: process.env.CAPTCHA_SECRET || undefined }),
+  payments: {
+    payme:
+      process.env.PAYME_MERCHANT_ID && process.env.PAYME_KEY
+        ? {
+            merchantId: process.env.PAYME_MERCHANT_ID,
+            key: process.env.PAYME_KEY,
+            test: process.env.PAYME_TEST === '1' || process.env.PAYME_TEST === 'true',
+            account: process.env.PAYME_ACCOUNT || 'order_id',
+          }
+        : undefined,
+    click:
+      process.env.CLICK_SERVICE_ID && process.env.CLICK_MERCHANT_ID && process.env.CLICK_SECRET_KEY
+        ? { serviceId: process.env.CLICK_SERVICE_ID, merchantId: process.env.CLICK_MERCHANT_ID, secretKey: process.env.CLICK_SECRET_KEY }
+        : undefined,
+  },
   plan: {
     trialDays: Number(process.env.PRO_TRIAL_DAYS || 7),
     price: Number(process.env.PRO_PRICE || 29000),

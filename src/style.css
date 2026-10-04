@@ -3313,3 +3313,71 @@ input[type='password']:focus {
     align-items: flex-start;
   }
 }
+
+/* ---------- оплата ---------- */
+
+.pay-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.pay-btn {
+  justify-content: center;
+  color: #fff;
+  border: 0;
+  font-weight: 700;
+}
+
+.pay-btn.pay-payme {
+  background: #00a7a5;
+}
+
+.pay-btn.pay-click {
+  background: #0062ff;
+}
+
+.pay-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.pay-btn:disabled {
+  opacity: 0.7;
+}
+
+.pay-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.pay-status > .icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-top: 2px;
+  color: var(--primary);
+}
+
+.pay-status div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pay-status.ok {
+  border-color: var(--ok);
+}
+
+.pay-status.ok > .icon {
+  color: var(--ok);
+}
+
+.pay-status.bad {
+  border-color: var(--err-line);
+  background: var(--err-bg);
+}
+
+.pay-status.bad > .icon {
+  color: var(--danger);
+}

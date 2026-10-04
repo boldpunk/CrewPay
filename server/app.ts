@@ -22,10 +22,12 @@ import {
   verifyPassword,
 } from './auth';
 import { Pow } from './captcha';
+import { type PaymentsConfig, checkoutUrl, enabledProviders, mountPayments } from './payments';
+import { grantPro } from './subscription';
 import type { DB } from './db';
 import { extractItems } from './pdftext';
 import { renderReport } from './report';
-import { months, payslips, profiles, proGrants, proRequests, users } from './schema';
+import { months, orders, payslips, profiles, proRequests, users } from './schema';
 
 export interface AppOptions {
   db: DB;
@@ -39,6 +41,8 @@ export interface AppOptions {
   plan?: PlanOptions;
   /** Регистраций в час с одного IP. */
   registerLimit?: number;
+  /** Онлайн-оплата Pro. */
+  payments?: PaymentsConfig;
 }
 
 export interface PlanOptions {
@@ -54,11 +58,6 @@ export interface PlanOptions {
 
 export const PRO_TERMS = [1, 3, 6, 12] as const;
 
-function addMonths(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setMonth(r.getMonth() + n);
-  return r;
-}
 
 type User = NonNullable<Awaited<ReturnType<typeof userBySession>>>;
 type Env = { Variables: { user: User | null } };
@@ -132,6 +131,8 @@ export function createApp(opts: AppOptions) {
   const admins = new Set((opts.plan?.adminEmails ?? []).map(normalizeEmail).filter(Boolean));
   const challengeLimiter = new RateLimiter(30, 10 * 60_000);
   const requestLimiter = new RateLimiter(10, 60 * 60_000);
+  const checkoutLimiter = new RateLimiter(20, 60 * 60_000);
+  const payments = opts.payments ?? {};
   const loginLimiter = new RateLimiter(10, 15 * 60_000);
   const registerLimiter = new RateLimiter(opts.registerLimit ?? 5, 60 * 60_000);
 
@@ -154,7 +155,11 @@ export function createApp(opts: AppOptions) {
       maxAge: SESSION_DAYS * 86400,
     });
 
-  app.use('*', secureHeaders({ crossOriginResourcePolicy: 'same-origin' }));
+  const strict = secureHeaders({ crossOriginResourcePolicy: 'same-origin' });
+  // Картинку превью и иконки показывают чужие сайты и мессенджеры.
+  const shared = secureHeaders({ crossOriginResourcePolicy: 'cross-origin' });
+  const SHARED = new Set(['/og.png', '/icon.svg', '/icon-192.png', '/icon-512.png']);
+  app.use('*', (c, next) => (SHARED.has(c.req.path) ? shared(c, next) : strict(c, next)));
 
   // Все изменяющие запросы — только из своего приложения: заголовок, который нельзя отправить с чужого сайта без CORS.
   app.use('/api/*', async (c, next) => {
@@ -303,8 +308,47 @@ export function createApp(opts: AppOptions) {
   // ---------- подписка ----------
 
   app.get('/api/plan', (c) =>
-    c.json({ price: opts.plan?.price ?? 0, trialDays, terms: PRO_TERMS, contactUrl: opts.plan?.contactUrl ?? '' }),
+    c.json({
+      price: opts.plan?.price ?? 0,
+      trialDays,
+      terms: PRO_TERMS,
+      contactUrl: opts.plan?.contactUrl ?? '',
+      providers: opts.plan?.price ? enabledProviders(payments) : [],
+    }),
   );
+
+  // ---------- онлайн-оплата ----------
+
+  app.post('/api/pay/checkout', bodyLimit({ maxSize: 4 * 1024 }), async (c) => {
+    const u = requireUser(c);
+    if (!checkoutLimiter.take(u.id)) throw new HttpError(429, 'Слишком много попыток оплаты, попробуйте позже');
+    const body = z
+      .object({
+        provider: z.enum(['payme', 'click']),
+        months: z.number().int().refine((m) => (PRO_TERMS as readonly number[]).includes(m)),
+      })
+      .parse(await c.req.json());
+    const price = opts.plan?.price ?? 0;
+    if (!price || !enabledProviders(payments).includes(body.provider)) throw new HttpError(400, 'Этот способ оплаты пока недоступен');
+    const [o] = await db
+      .insert(orders)
+      .values({ userId: u.id, months: body.months, amount: price * body.months, provider: body.provider })
+      .returning({ id: orders.id, amount: orders.amount });
+    const url = checkoutUrl(payments, body.provider, o.id, o.amount, `${siteUrl(c)}/?paid=${o.id}`);
+    return c.json({ orderId: o.id, url }, 201);
+  });
+
+  app.get('/api/pay/orders/:id', async (c) => {
+    const u = requireUser(c);
+    const id = z.coerce.number().int().positive().parse(c.req.param('id'));
+    const [o] = await db
+      .select({ id: orders.id, status: orders.status, months: orders.months, amount: orders.amount, provider: orders.provider, paidAt: orders.paidAt })
+      .from(orders)
+      .where(and(eq(orders.id, id), eq(orders.userId, u.id)))
+      .limit(1);
+    if (!o) throw new HttpError(404, 'Заказ не найден');
+    return c.json({ order: o, plan: planOf(u) });
+  });
 
   app.post('/api/subscription/request', bodyLimit({ maxSize: 8 * 1024 }), async (c) => {
     const u = requireUser(c);
@@ -350,24 +394,10 @@ export function createApp(opts: AppOptions) {
   app.post('/api/admin/grant', bodyLimit({ maxSize: 8 * 1024 }), async (c) => {
     const admin = requireAdmin(c);
     const body = z.object({ email: z.string().max(254), months: z.number().int().min(0).max(36) }).parse(await c.req.json());
-    const [u] = await db
-      .select({ id: users.id, email: users.email, proUntil: users.proUntil, proSource: users.proSource })
-      .from(users)
-      .where(eq(users.email, normalizeEmail(body.email)))
-      .limit(1);
+    const [u] = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.email, normalizeEmail(body.email))).limit(1);
     if (!u) throw new HttpError(404, 'Пользователь с таким email не найден');
     // Продлеваем от конца текущей подписки, если она ещё идёт; 0 месяцев — отключить Pro.
-    const from = u.proUntil && u.proUntil.getTime() > Date.now() ? u.proUntil : new Date();
-    const until = body.months > 0 ? addMonths(from, body.months) : null;
-    await db
-      .update(users)
-      .set({ proUntil: until, proSource: until ? 'paid' : null })
-      .where(eq(users.id, u.id));
-    await db.insert(proGrants).values({ userId: u.id, months: body.months, until, grantedBy: admin.email });
-    await db
-      .update(proRequests)
-      .set({ status: body.months > 0 ? 'done' : 'rejected' })
-      .where(and(eq(proRequests.userId, u.id), eq(proRequests.status, 'open')));
+    const until = await db.transaction((tx) => grantPro(tx, u.id, body.months, admin.email));
     return c.json({ email: u.email, plan: planOf({ email: u.email, proUntil: until, proSource: until ? 'paid' : null }) });
   });
 
@@ -567,6 +597,9 @@ export function createApp(opts: AppOptions) {
   });
 
   app.all('/api/*', (c) => c.json({ error: 'Не найдено' }, 404));
+
+  // Адреса для Payme и Click — вне /api: их вызывают платёжные системы, без заголовка приложения.
+  mountPayments(app, db, payments);
 
   return app;
 }

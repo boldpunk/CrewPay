@@ -14,7 +14,7 @@ import {
   summarizeFlights,
   validRoute,
 } from './calc/flights';
-import { type Account, ApiError, type ServerProfile, type UploadedPayslip, api, type Plan, type PlanInfo, type ProRequest } from './api';
+import { type Account, ApiError, type ServerProfile, type UploadedPayslip, api, type Plan, type PlanInfo, type PayOrder, type PayProvider, type ProRequest } from './api';
 import type { Category, MonthResult, Regulation, ResolvedPosition } from './calc/types';
 import {
   type AppState,
@@ -2334,6 +2334,53 @@ async function registerWithPow(body: { email: string; password: string; name: st
 
 let adminQuery = '';
 
+/** Возврат со страницы оплаты: ?paid=<номер заказа>. Ждём подтверждения от платёжной системы. */
+let payWait: { id: number; order: PayOrder | null; timedOut: boolean } | null = null;
+
+const PROVIDER_LABEL: Record<PayProvider, string> = { payme: 'Payme', click: 'Click' };
+
+async function watchPayment(id: number) {
+  payWait = { id, order: null, timedOut: false };
+  const started = Date.now();
+  while (payWait?.id === id) {
+    try {
+      const r = await api.order(id);
+      payWait.order = r.order;
+      if (r.order.status === 'paid') {
+        await loadAccount();
+        toast('Оплата прошла — Pro активен');
+        if (view === 'pro') renderPro($('#view')!);
+        return;
+      }
+      if (r.order.status === 'cancelled') break;
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 404 || e.status === 401)) {
+        payWait = null;
+        break;
+      }
+    }
+    if (Date.now() - started > 5 * 60_000) {
+      payWait.timedOut = true;
+      break;
+    }
+    if (view === 'pro') renderPro($('#view')!);
+    await new Promise((r) => setTimeout(r, 2500));
+  }
+  if (view === 'pro') renderPro($('#view')!);
+}
+
+function payWaitHtml(): string {
+  if (!payWait) return '';
+  const o = payWait.order;
+  if (o?.status === 'paid')
+    return `<div class="card pay-status ok">${icon('check')}<div><b>Оплата получена</b><span class="muted small">Заказ №${o.id} · Pro на ${o.months} ${plural(o.months, 'месяц', 'месяца', 'месяцев')} · ${PROVIDER_LABEL[o.provider]}</span></div></div>`;
+  if (o?.status === 'cancelled')
+    return `<div class="card pay-status bad">${icon('alert')}<div><b>Оплата не прошла</b><span class="muted small">Заказ №${o.id} отменён — деньги не списаны. Можно попробовать ещё раз.</span></div></div>`;
+  if (payWait.timedOut)
+    return `<div class="card pay-status">${icon('clock')}<div><b>Ждём подтверждения</b><span class="muted small">Заказ №${payWait.id}. Если деньги списались, Pro включится автоматически — обновите страницу через пару минут.</span></div></div>`;
+  return `<div class="card pay-status">${icon('refresh', 'icon spin')}<div><b>Проверяем оплату…</b><span class="muted small">Заказ №${payWait.id} — обычно это несколько секунд.</span></div></div>`;
+}
+
 function renderPro(root: HTMLElement) {
   if (serverUp && !planInfo)
     api
@@ -2369,8 +2416,33 @@ function renderPro(root: HTMLElement) {
     }</p>`;
 
   const terms = info.terms.length ? info.terms : [1, 3, 6, 12];
+  const providers = info.providers ?? [];
   const requestCard =
-    account && !plan?.admin
+    account && !plan?.admin && providers.length && !proRequest
+      ? `
+      <form class="card" id="pay-form">
+        <div class="card-head">${icon('crown')}<h2>${plan?.pro ? 'Продлить Pro' : 'Оформить Pro'}</h2></div>
+        <div class="terms" role="radiogroup" aria-label="Срок">
+          ${terms
+            .map(
+              (m, i) => `
+            <label class="term">
+              <input type="radio" name="months" value="${m}" ${i === 0 ? 'checked' : ''} />
+              <span class="term-box"><b>${m} ${plural(m, 'месяц', 'месяца', 'месяцев')}</b><span>${price(m)}</span></span>
+            </label>`,
+            )
+            .join('')}
+        </div>
+        <div class="pay-buttons">
+          ${providers
+            .map((pv) => `<button class="btn pay-btn pay-${pv}" type="submit" data-provider="${pv}">${icon('wallet')}Оплатить через ${PROVIDER_LABEL[pv]}</button>`)
+            .join('')}
+        </div>
+        <p class="field-hint">Откроется страница ${providers.map((pv) => PROVIDER_LABEL[pv]).join(' или ')}. После оплаты Pro включится сам${
+          plan?.pro ? ' и продлится от текущей даты окончания' : ''
+        }.</p>
+      </form>`
+      : account && !plan?.admin
       ? proRequest
         ? `
       <div class="card">
@@ -2431,6 +2503,7 @@ function renderPro(root: HTMLElement) {
         <h1>Подписка</h1>
         ${status}
       </div>
+      ${payWaitHtml()}
       <div class="plans">
         <div class="card plan-card">
           <h2>Бесплатно</h2>
@@ -2448,6 +2521,24 @@ function renderPro(root: HTMLElement) {
       ${adminCard}
     </section>`;
 
+  $<HTMLFormElement>('#pay-form', root)?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const btn = (e.submitter as HTMLButtonElement | null) ?? $<HTMLButtonElement>('[data-provider]', form)!;
+    const provider = btn.dataset.provider as PayProvider;
+    const months = Number(new FormData(form).get('months'));
+    form.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    const label = btn.innerHTML;
+    btn.innerHTML = `${icon('refresh', 'icon spin')}Открываю ${PROVIDER_LABEL[provider]}…`;
+    try {
+      const { url } = await api.checkout(provider, months);
+      window.location.href = url;
+    } catch (ex) {
+      form.querySelectorAll('button').forEach((b) => (b.disabled = false));
+      btn.innerHTML = label;
+      toast(ex instanceof ApiError ? ex.message : 'Сервер недоступен');
+    }
+  });
   $<HTMLFormElement>('#pro-form', root)?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target as HTMLFormElement);
@@ -3112,6 +3203,13 @@ async function boot() {
     serverUp = await api.available();
     if (serverUp) {
       await loadAccount();
+      // Вернулись со страницы Payme / Click.
+      const paid = Number(new URLSearchParams(location.search).get('paid'));
+      if (Number.isSafeInteger(paid) && paid > 0) {
+        window.history.replaceState(null, '', location.pathname);
+        view = 'pro';
+        if (account) watchPayment(paid);
+      }
       api.planInfo().then((i) => (planInfo = i)).catch(() => {});
     }
   }

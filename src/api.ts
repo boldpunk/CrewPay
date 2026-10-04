@@ -21,6 +21,19 @@ export interface PlanInfo {
   trialDays: number;
   terms: number[];
   contactUrl: string;
+  /** Подключённые способы онлайн-оплаты. */
+  providers?: PayProvider[];
+}
+
+export type PayProvider = 'payme' | 'click';
+
+export interface PayOrder {
+  id: number;
+  status: 'pending' | 'paid' | 'cancelled';
+  months: number;
+  amount: number;
+  provider: PayProvider;
+  paidAt: string | null;
 }
 
 export interface ProRequest {
@@ -157,5 +170,8 @@ export const api = {
     req<{ requests: AdminRequest[]; users: AdminUser[] }>(`api/admin/subscriptions${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   adminGrant: (email: string, months: number) =>
     req<{ email: string; plan: Plan }>('api/admin/grant', { method: 'POST', json: { email, months } }),
+  checkout: (provider: PayProvider, months: number) =>
+    req<{ orderId: number; url: string }>('api/pay/checkout', { method: 'POST', json: { provider, months } }),
+  order: (id: number) => req<{ order: PayOrder; plan: Plan }>(`api/pay/orders/${id}`, { cache: 'no-store' }),
   adminReject: (id: string) => req<{ ok: true }>(`api/admin/requests/${id}/reject`, { method: 'POST' }),
 };
