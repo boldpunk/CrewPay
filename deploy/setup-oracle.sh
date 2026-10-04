@@ -129,9 +129,17 @@ if ! $SUDO certbot --nginx "${CERT_ARGS[@]}" --non-interactive --agree-tos -m "$
   exit 1
 fi
 
-# --- каталог приложения и ключ для деплоя из GitHub ---
+# --- каталог приложения ---
 $SUDO mkdir -p "$APP_DIR"
 $SUDO chown "$(id -un)":"$(id -gn)" "$APP_DIR"
+
+# Из GitHub Actions ключ уже есть в секретах; логи публичного репозитория видны всем —
+# поэтому ни ключей, ни секретов в CI не печатаем.
+if [ "${CREWPAY_CI:-}" = 1 ]; then
+  say "Сервер готов. Сертификат: $NAMES"
+  exit 0
+fi
+
 KEY=~/.ssh/crewpay_deploy
 if [ ! -f "$KEY" ]; then
   say "Создаю отдельный SSH-ключ для деплоя из GitHub"

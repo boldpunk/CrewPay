@@ -1,0 +1,74 @@
+name: Server
+
+# Обслуживание сервера по SSH из GitHub: ключ хранится в секретах репозитория.
+# Логи публичного репозитория видны всем — команды ниже не печатают секретов.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Что сделать
+        type: choice
+        options: [status, setup, logs, restart]
+        default: status
+      email:
+        description: Email для Let's Encrypt (только для setup)
+        required: false
+
+concurrency:
+  group: server
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+    steps:
+      - name: Check secrets
+        run: |
+          if [ -z "$SSH_HOST" ]; then
+            echo "::error::Добавьте секреты SSH_HOST, SSH_USER, SSH_PRIVATE_KEY (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+          if [ "${{ inputs.action }}" = setup ] && [ -z "${{ inputs.email }}" ]; then
+            echo "::error::Для setup укажите email"
+            exit 1
+          fi
+          [ -n "${{ inputs.email }}" ] && echo "::add-mask::${{ inputs.email }}" || true
+
+      - name: ${{ inputs.action }}
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 20m
+          script: |
+            set -u
+            case "${{ inputs.action }}" in
+              setup)
+                curl -fsSL https://raw.githubusercontent.com/boldpunk/CrewPay/${{ github.sha }}/deploy/setup-oracle.sh -o /tmp/crewpay-setup.sh
+                CREWPAY_CI=1 bash /tmp/crewpay-setup.sh "${{ inputs.email }}"
+                ;;
+              status)
+                echo "== система";  . /etc/os-release; echo "$PRETTY_NAME $(uname -m)"; uptime
+                echo "== диск/память"; df -h / | tail -1; free -h | sed -n 2p
+                echo "== порты";   sudo ss -ltnp | grep -E ':(80|443|3020) ' || echo "ничего не слушает 80/443/3020"
+                echo "== docker";  docker --version 2>/dev/null || echo "docker не установлен"
+                [ -d /opt/crewpay ] && (cd /opt/crewpay && docker compose ps 2>/dev/null) || echo "/opt/crewpay ещё нет"
+                echo "== приложение"; curl -fsS --max-time 5 http://127.0.0.1:3020/api/health || echo "не отвечает на 127.0.0.1:3020"
+                echo "== nginx";   (sudo nginx -t 2>&1 | tail -1) || echo "nginx не установлен"
+                echo "== сертификат"; sudo certbot certificates 2>/dev/null | grep -E 'Domains|Expiry' || echo "сертификата нет"
+                echo "== снаружи"; curl -sS -o /dev/null -w 'https://crewpay.uz → %{http_code}\n' --max-time 10 https://crewpay.uz/api/health || echo "https://crewpay.uz недоступен"
+                ;;
+              logs)
+                cd /opt/crewpay && docker compose logs --no-color --tail 200 web
+                ;;
+              restart)
+                echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null
+                cd /opt/crewpay && docker compose pull web && docker compose up -d web && sleep 5 && docker compose ps
+                ;;
+            esac

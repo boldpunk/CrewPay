@@ -92,6 +92,10 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
   настраивает crewpay.uz → `127.0.0.1:3020`, выпускает HTTPS-сертификат и печатает значения секретов
   (`SSH_HOST`, `SSH_USER`, отдельный ключ для `SSH_PRIVATE_KEY`).
 
+**Обслуживание без входа на сервер:** Actions → **Server** → Run workflow → `status` (состояние), `setup` (разовая
+настройка, тот же скрипт), `logs` (логи приложения), `restart` (перезапуск). Работает по секретам `SSH_*`; ключи
+и секреты в логах не печатаются.
+
 **5.** Actions → CI & Deploy → Run workflow (или любой push в `main`). Проверка: `https://crewpay.uz/api/health` → `{"ok":true}`.
 
 Справочник ставок можно вынести на сервер (`REGULATION_PATH`, см. `docker-compose.yml`) и править без релиза.
