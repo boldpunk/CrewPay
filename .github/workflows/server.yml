@@ -57,6 +57,8 @@ jobs:
                 echo "== docker";  docker --version 2>/dev/null || echo "docker не установлен"
                 [ -d /opt/crewpay ] && (cd /opt/crewpay && docker compose ps 2>/dev/null) || echo "/opt/crewpay ещё нет"
                 echo "== приложение"; curl -fsS --max-time 5 http://127.0.0.1:3020/api/health || echo "не отвечает на 127.0.0.1:3020"
+                echo; echo "== подписка"; curl -fsS --max-time 5 http://127.0.0.1:3020/api/plan || echo "нет /api/plan"
+                echo; [ -f /opt/crewpay/.env ] && for k in ADMIN_EMAIL CAPTCHA_SECRET; do grep -q "^$k=." /opt/crewpay/.env && echo "$k задан" || echo "$k НЕ задан"; done
                 echo "== 80/443";  docker ps --filter publish=443 --format '{{.Names}} ({{.Image}})' 2>/dev/null || true
                 command -v nginx >/dev/null && (sudo nginx -t 2>&1 | tail -1) || echo "nginx на хосте нет"
                 [ -f /opt/crewpay/edge.env ] && grep EDGE_NETWORK /opt/crewpay/edge.env || true
