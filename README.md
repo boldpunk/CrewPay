@@ -84,13 +84,12 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
 | `DATABASE_URL` | строка подключения Neon (`postgresql://…neon.tech/…?sslmode=require`) |
 | `SITE_URL` | `https://crewpay.uz` |
 
-**4. Сервер (Oracle Cloud, Ampere A1 / ARM).** Образ собирается для x86 и ARM. Один раз:
-- Oracle Console → Networking → Virtual Cloud Networks → VCN сервера → Security Lists → Default →
-  Add Ingress Rules: `0.0.0.0/0`, TCP, порт **80**, и такое же правило для **443**.
-- По SSH на сервере: `curl -fsSL https://raw.githubusercontent.com/boldpunk/CrewPay/main/deploy/setup-oracle.sh | bash -s -- ваш@email`
-  — ставит Docker, nginx, certbot, открывает порты в файрволе самого сервера (iptables/firewalld),
-  настраивает crewpay.uz → `127.0.0.1:3020`, выпускает HTTPS-сертификат и печатает значения секретов
-  (`SSH_HOST`, `SSH_USER`, отдельный ключ для `SSH_PRIVATE_KEY`).
+**4. Сервер (Oracle Cloud dcau-hub, Ampere A1 / ARM).** Образ собирается для x86 и ARM.
+На этом сервере 80/443 держит Caddy другого проекта (`dcau-hub-caddy-1`, сайты boldpunk.uz и fyndue.uz) —
+CrewPay встаёт рядом так же, как Fyndue: контейнер подключается к сети Caddy под именем `crewpay-web`,
+в действующий Caddyfile добавляется блок crewpay.uz (резервная копия → `caddy validate` → reload → запись в тот же
+файл). HTTPS Caddy выпускает сам; файрвол и Security List менять не нужно. Запуск: Actions → **Server** → `setup`.
+На чистом сервере тот же скрипт ставит nginx + certbot и открывает порты.
 
 **Обслуживание без входа на сервер:** Actions → **Server** → Run workflow → `status` (состояние), `setup` (разовая, нужен секрет `ADMIN_EMAIL`
 настройка, тот же скрипт), `logs` (логи приложения), `restart` (перезапуск). Работает по секретам `SSH_*`; ключи

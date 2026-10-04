@@ -1,0 +1,17 @@
+# Сервер, где порты 80/443 держит Caddy в Docker другого проекта (Oracle VM: dcau-hub-caddy-1,
+# сайты boldpunk.uz и fyndue.uz). Контейнер CrewPay подключается к сети этого Caddy под именем
+# `crewpay-web`, и Caddyfile проксирует crewpay.uz на `crewpay-web:3000`.
+# Включается из .env (пишет deploy/setup-oracle.sh в /opt/crewpay/edge.env):
+#   COMPOSE_FILE=docker-compose.yml:deploy/docker-compose.shared-caddy.yml
+#   EDGE_NETWORK=dcau-hub_default
+services:
+  web:
+    networks:
+      default: {}
+      edge:
+        aliases: [crewpay-web]
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:?set EDGE_NETWORK in .env}

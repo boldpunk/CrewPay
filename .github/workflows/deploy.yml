@@ -105,7 +105,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: docker-compose.yml
+          source: docker-compose.yml,deploy/docker-compose.shared-caddy.yml
           target: /opt/crewpay
           overwrite: true
 
@@ -124,6 +124,8 @@ jobs:
             SITE_URL=${{ secrets.SITE_URL }}
             POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
             ENVEOF
+            # Режим «общий Caddy» (сеть другого проекта) — его записал deploy/setup-oracle.sh.
+            [ -f /opt/crewpay/edge.env ] && cat /opt/crewpay/edge.env >> /opt/crewpay/.env
             chmod 600 /opt/crewpay/.env
 
       - name: Pull and restart
@@ -139,4 +141,7 @@ jobs:
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
             docker compose pull web
             docker compose up -d web
+            sleep 8
+            docker compose ps web
+            curl -fsS --max-time 5 http://127.0.0.1:3020/api/health && echo " ← приложение отвечает"
             docker image prune -f
