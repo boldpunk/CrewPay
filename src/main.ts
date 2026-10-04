@@ -9,6 +9,7 @@ import {
   formatDuration,
   isPublicHoliday,
   normalizeRoute,
+  parseDuration,
   parseQuickLine,
   summarizeFlights,
   validRoute,
@@ -1535,6 +1536,221 @@ function flightTotalsHtml(): string {
     </div>`;
 }
 
+// ---------- форма «Новый рейс» ----------
+
+interface FlightDraft {
+  date: string;
+  from: string;
+  to: string;
+  block: string;
+  night: string;
+  duty: string;
+  dh: boolean;
+}
+
+let draft: FlightDraft | null = null;
+let draftHint = '';
+let draftFocus: string | null = null;
+
+function freshDraft(): FlightDraft {
+  return { date: defaultFlightDate(period()), from: '', to: '', block: '', night: '', duty: '', dh: false };
+}
+
+/** Набрано в русской раскладке: «ЕФЫ» → «TAS». */
+const RU_TO_EN: Record<string, string> = Object.fromEntries(
+  [...'ЙЦУКЕНГШЩЗФЫВАПРОЛДЯЧСМИТЬ'].map((ch, i) => [ch, 'QWERTYUIOPASDFGHJKLZXCVBNM'[i]]),
+);
+function iata(v: string): string {
+  return [...v.toUpperCase()]
+    .map((ch) => RU_TO_EN[ch] ?? ch)
+    .filter((ch) => /[A-Z]/.test(ch))
+    .join('')
+    .slice(0, 3);
+}
+
+function newFlightForm(): string {
+  if (!draft || !draft.date.startsWith(state.month)) draft = { ...freshDraft(), from: draft?.from ?? '' };
+  const d = draft;
+  const { min, max } = monthBounds(state.month);
+  const airports = [...new Set([...routeMemory().keys()].flatMap((r) => r.split('-')))].sort();
+  const timeField = (id: 'block' | 'night' | 'duty', label: string, ic: string, ph: string, hint: string) => `
+    <label class="nf-field nf-time" for="nf-${id}">
+      <span class="nf-label">${icon(ic)}${label}</span>
+      <input id="nf-${id}" type="text" inputmode="numeric" autocomplete="off" value="${esc(d[id])}" placeholder="${ph}" data-nf="${id}" />
+      <span class="nf-hint">${hint}</span>
+    </label>`;
+  return `
+    <form class="card new-flight" id="nf-form" autocomplete="off" novalidate>
+      <div class="card-head">${icon('plus')}<h2>Новый рейс</h2><span class="muted small head-note nf-keys">Tab — следующее поле, Enter — добавить</span></div>
+      <div class="nf-grid">
+        <label class="nf-field nf-date" for="nf-date">
+          <span class="nf-label">${icon('calendar')}Дата вылета</span>
+          <input id="nf-date" type="date" value="${esc(d.date)}" min="${min}" max="${max}" data-nf="date" />
+        </label>
+        <div class="nf-route">
+          <label class="nf-field" for="nf-from">
+            <span class="nf-label">${icon('plane')}Откуда</span>
+            <input id="nf-from" class="iata" type="text" maxlength="3" autocapitalize="characters" spellcheck="false" list="known-airports" value="${esc(d.from)}" placeholder="TAS" data-nf="from" />
+          </label>
+          <button type="button" class="nf-swap" id="nf-swap" title="Поменять местами" aria-label="Поменять аэропорты местами">⇄</button>
+          <label class="nf-field" for="nf-to">
+            <span class="nf-label">${icon('plane')}Куда</span>
+            <input id="nf-to" class="iata" type="text" maxlength="3" autocapitalize="characters" spellcheck="false" list="known-airports" value="${esc(d.to)}" placeholder="DXB" data-nf="to" />
+          </label>
+        </div>
+        <div class="nf-times">
+          ${timeField('block', 'Полётное', 'clock', '6:00', 'обязательно')}
+          ${timeField('night', 'Ночные', 'moon', '0:00', 'из полётного')}
+          ${timeField('duty', 'Рабочее', 'briefcase', '0:00', 'справочно')}
+        </div>
+      </div>
+      <datalist id="known-airports">${airports.map((a) => `<option value="${a}"></option>`).join('')}</datalist>
+      ${draftHint ? `<p class="nf-note">${icon('sparkle')}${esc(draftHint)}</p>` : ''}
+      <p class="nf-error" id="nf-error" role="alert" hidden></p>
+      <div class="nf-actions">
+        <label class="switch">
+          <input type="checkbox" id="nf-dh" ${d.dh ? 'checked' : ''} />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>Перелёт пассажиром <b>DH</b></span>
+        </label>
+        <button class="btn primary" type="submit">${icon('plus')}Добавить рейс</button>
+      </div>
+      <details class="paste">
+        <summary>${icon('copy')}Вставить списком</summary>
+        <textarea id="paste-input" rows="4" spellcheck="false" placeholder="05.08 TAS-DXB 6:00 3:02 9:42&#10;06.08 DXB-TAS 3:04 0:00 5:10&#10;10.08 DH IST-TAS 5:05"></textarea>
+        <div class="paste-row">
+          <span class="field-hint">Строка: дата, маршрут, полётное, ночные, рабочее. DH — перелёт пассажиром.</span>
+          <button type="button" class="btn small" id="paste-add">${icon('plus')}Добавить все</button>
+        </div>
+      </details>
+    </form>`;
+}
+
+function bindNewFlight(root: HTMLElement) {
+  const form = $<HTMLFormElement>('#nf-form', root);
+  if (!form || !draft) return;
+  const d = draft;
+  const el = (id: string) => $<HTMLInputElement>(`#nf-${id}`, root)!;
+  const err = $('#nf-error', root)!;
+  const fail = (msg: string, focusId: string) => {
+    err.textContent = msg;
+    err.hidden = false;
+    el(focusId).classList.add('invalid');
+    el(focusId).focus();
+  };
+
+  // Время маршрута из прошлых рейсов — если поля ещё пустые.
+  const suggest = () => {
+    if (d.from.length !== 3 || d.to.length !== 3 || d.block) return;
+    const known = routeMemory().get(`${d.from}-${d.to}`);
+    if (!known) return;
+    d.block = known.block;
+    d.night = known.night;
+    d.duty = known.duty;
+    for (const k of ['block', 'night', 'duty'] as const) el(k).value = d[k];
+    toast(`Время ${d.from}-${d.to} — из прошлого рейса`);
+  };
+
+  form.querySelectorAll<HTMLInputElement>('[data-nf]').forEach((inp) => {
+    const key = inp.dataset.nf as keyof FlightDraft;
+    inp.addEventListener('focus', () => document.body.classList.add('typing'));
+    inp.addEventListener('input', () => {
+      inp.classList.remove('invalid');
+      err.hidden = true;
+      if (key === 'from' || key === 'to') {
+        const v = iata(inp.value);
+        if (v !== inp.value) inp.value = v;
+        d[key] = v;
+        // Три буквы — сразу к следующему полю.
+        if (v.length === 3) {
+          if (key === 'to') suggest();
+          el(key === 'from' ? 'to' : 'block').focus();
+        }
+      } else if (key === 'date') d.date = inp.value;
+      else if (key !== 'dh') {
+        d[key] = inp.value;
+        // «6:00» / «0600» набрано полностью — дальше.
+        if (/^\d{1,2}:\d{2}$/.test(inp.value) || /^\d{4}$/.test(inp.value)) {
+          inp.value = autoColon(inp.value);
+          d[key] = inp.value;
+          const next = key === 'block' ? 'night' : key === 'night' ? 'duty' : null;
+          if (next) el(next).focus();
+        }
+      }
+    });
+    inp.addEventListener('blur', () => {
+      document.body.classList.remove('typing');
+      if (key === 'block' || key === 'night' || key === 'duty') {
+        inp.value = autoColon(inp.value);
+        d[key] = inp.value;
+      }
+      if (key === 'to') suggest();
+    });
+  });
+  el('dh').addEventListener('change', () => (d.dh = el('dh').checked));
+  $('#nf-swap', root)?.addEventListener('click', () => {
+    [d.from, d.to] = [d.to, d.from];
+    el('from').value = d.from;
+    el('to').value = d.to;
+  });
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    for (const k of ['block', 'night', 'duty'] as const) d[k] = autoColon(el(k).value);
+    d.date = el('date').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) return fail('Укажите дату вылета.', 'date');
+    if (d.from.length !== 3) return fail('Аэропорт вылета — три буквы, например TAS.', 'from');
+    if (d.to.length !== 3) return fail('Аэропорт прилёта — три буквы, например DXB.', 'to');
+    if (d.from === d.to) return fail('Аэропорты вылета и прилёта совпадают.', 'to');
+    const block = parseDuration(d.block);
+    const night = parseDuration(d.night);
+    const duty = parseDuration(d.duty);
+    if (!(block > 0)) return fail('Укажите полётное время, например 6:00.', 'block');
+    if (Number.isNaN(night)) return fail('Ночные — в формате 3:02.', 'night');
+    if (night > block) return fail('Ночных часов больше, чем полётного времени.', 'night');
+    if (Number.isNaN(duty)) return fail('Рабочее время — в формате 9:42.', 'duty');
+
+    const route = `${d.from}-${d.to}`;
+    // Следующий рейс обычно обратный: готовим его заранее.
+    const back = routeMemory().get(`${d.to}-${d.from}`);
+    const added: Omit<FlightForm, 'id'> = { date: d.date, route, block: d.block, night: d.night, duty: d.duty, dh: d.dh };
+    draft = { date: d.date, from: d.to, to: d.from, block: back?.block ?? '', night: back?.night ?? '', duty: back?.duty ?? '', dh: false };
+    draftHint = `Добавлен ${route}. Следующий — обратный ${d.to}-${d.from}${back ? ', время из прошлого рейса' : ''}: проверьте и нажмите «Добавить», или измените поля.`;
+    draftFocus = 'nf-block';
+    addFlights(root, [added]);
+    toast(`Добавлен ${route}`);
+  });
+
+  // Список строками — для вставки ростера.
+  $('#paste-add', root)?.addEventListener('click', () => {
+    const text = $<HTMLTextAreaElement>('#paste-input', root)!.value;
+    const lines = text.split(/\r?\n/).map((l) => parseQuickLine(l, state.month)).filter((x) => x !== null);
+    if (!lines.length) return toast('Не понял строки — пример: 05.08 TAS-DXB 6:00 3:02 9:42');
+    const mem = routeMemory();
+    let lastDate = defaultFlightDate(period());
+    const items = lines.map((l) => {
+      const known = !l.block && validRoute(l.route) ? mem.get(l.route) : undefined;
+      lastDate = l.date ?? lastDate;
+      return {
+        date: lastDate,
+        route: l.route,
+        block: l.block || known?.block || '',
+        night: l.night || (l.block ? '' : known?.night || ''),
+        duty: l.duty || (l.block ? '' : known?.duty || ''),
+        dh: l.dh,
+      };
+    });
+    draftHint = '';
+    addFlights(root, items);
+    toast(`Добавлено рейсов: ${items.length}`);
+  });
+
+  if (draftFocus) {
+    $<HTMLInputElement>(`#${draftFocus}`, root)?.focus();
+    draftFocus = null;
+  }
+}
+
 function renderFlights(root: HTMLElement) {
   document.body.classList.remove('typing');
   const p = period();
@@ -1569,14 +1785,7 @@ function renderFlights(root: HTMLElement) {
         <div id="ft-gauge">${gauge()}</div>
       </div>
 
-      <form class="card quick" id="quick-form" autocomplete="off">
-        <div class="card-head">${icon('sparkle')}<h2>Быстрый ввод</h2></div>
-        <div class="quick-row">
-          <input type="text" id="quick-input" placeholder="05.08 TAS-DXB 6:00 3:02 9:42" aria-label="Рейс одной строкой" spellcheck="false" />
-          <button class="btn primary" type="submit" aria-label="Добавить">${icon('plus')}<span class="btn-text">Добавить</span></button>
-        </div>
-        <p class="field-hint">Порядок: дата, маршрут, полётное, ночные, рабочее. <b>DH</b> — перелёт пассажиром. Можно вставить сразу несколько строк.</p>
-      </form>
+      ${newFlightForm()}
 
       <div class="card">
         <div class="card-head">${icon('plane')}<h2>Журнал${multi ? ` · период ${state.active + 1}` : ''}</h2><span class="muted small head-note">${t.count} ${plural(t.count, 'рейс', 'рейса', 'рейсов')}</span></div>
@@ -1644,6 +1853,8 @@ function bindFlights(root: HTMLElement) {
   root.querySelectorAll<HTMLButtonElement>('[data-fmonth]').forEach((b) =>
     b.addEventListener('click', () => {
       state.month = shiftMonth(state.month, Number(b.dataset.fmonth));
+      draft = null;
+      draftHint = '';
       if (state.payslip?.parsed.month !== state.month) state.payslip = null;
       persist();
       renderFlights(root);
@@ -1657,42 +1868,7 @@ function bindFlights(root: HTMLElement) {
     }),
   );
 
-  const quick = $<HTMLInputElement>('#quick-input', root)!;
-  const addQuick = (text: string) => {
-    const lines = text.split(/\r?\n/).map((l) => parseQuickLine(l, state.month)).filter((x) => x !== null);
-    if (!lines.length) return toast('Не понял строку — пример: 05.08 TAS-DXB 6:00 3:02 9:42');
-    const mem = routeMemory();
-    const p = period();
-    let lastDate = defaultFlightDate(p);
-    const items = lines.map((l) => {
-      const known = !l.block && validRoute(l.route) ? mem.get(l.route) : undefined;
-      lastDate = l.date ?? lastDate;
-      return {
-        date: lastDate,
-        route: l.route,
-        block: l.block || known?.block || '',
-        night: l.night || (l.block ? '' : known?.night || ''),
-        duty: l.duty || (l.block ? '' : known?.duty || ''),
-        dh: l.dh,
-      };
-    });
-    addFlights(root, items);
-    toast(items.length === 1 ? `Добавлен ${items[0].route || 'рейс'}` : `Добавлено рейсов: ${items.length}`);
-    $<HTMLInputElement>('#quick-input', root)?.focus();
-  };
-  $<HTMLFormElement>('#quick-form', root)!.addEventListener('submit', (e) => {
-    e.preventDefault();
-    if (quick.value.trim()) addQuick(quick.value);
-  });
-  quick.addEventListener('paste', (e) => {
-    const text = e.clipboardData?.getData('text') ?? '';
-    if (/\n/.test(text.trim())) {
-      e.preventDefault();
-      addQuick(text);
-    }
-  });
-  quick.addEventListener('focus', () => document.body.classList.add('typing'));
-  quick.addEventListener('blur', () => document.body.classList.remove('typing'));
+  bindNewFlight(root);
 
   const list = $('#flight-list', root);
   const findFlight = (el: Element) => {
