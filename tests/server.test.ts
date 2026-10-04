@@ -198,6 +198,39 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     expect(text).toContain('crewpay.test');
   });
 
+  it('журнал рейсов: сохраняется в месяце и попадает в PDF', async () => {
+    const withFlights = {
+      ...state,
+      periods: [
+        {
+          ...state.periods[0],
+          hours: '9,07',
+          nightHours: '3,03',
+          flights: [
+            { id: 'f1', date: '2026-08-05', route: 'TAS-DXB', block: '6:00', night: '3:02', duty: '9:42', dh: false },
+            { id: 'f2', date: '2026-08-06', route: 'DXB-TAS', block: '3:04', night: '', duty: '5:10', dh: false },
+          ],
+        },
+      ],
+    };
+    const r = await call('/api/months/2026-08', { method: 'PUT', json: { state: withFlights, payslipId: null } });
+    expect(r.status).toBe(200);
+    const list = await (await call('/api/months')).json();
+    expect(list.months[0].state.periods[0].flights).toHaveLength(2);
+
+    const bad = await call('/api/months/2026-08', {
+      method: 'PUT',
+      json: { state: { ...withFlights, periods: [{ ...withFlights.periods[0], flights: [{ id: 'x', evil: true }] }] } },
+    });
+    expect(bad.status).toBe(400);
+
+    const pdf = await call('/api/report', { method: 'POST', json: { month: '2026-08', state: withFlights } });
+    const text = (await extractItems(new Uint8Array(await pdf.arrayBuffer()))).map((i) => i.s).join(' ');
+    expect(text).toContain('Журнал рейсов');
+    expect(text).toContain('TAS-DXB');
+    expect(text).toContain('9:04');
+  });
+
   it('чужие данные недоступны', async () => {
     cookie = '';
     const r = await call('/api/auth/register', { method: 'POST', json: { email: 'other@example.com', password: 'other password' } });

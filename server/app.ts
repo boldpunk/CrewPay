@@ -54,6 +54,22 @@ const periodSchema = z
     statusId: z.string().max(32),
     salary: z.string().max(32),
     rate: z.string().max(32),
+    flights: z
+      .array(
+        z
+          .object({
+            id: z.string().max(40),
+            date: z.string().max(10),
+            route: z.string().max(40),
+            block: z.string().max(10),
+            night: z.string().max(10),
+            duty: z.string().max(10),
+            dh: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(200)
+      .optional(),
   })
   .strict();
 

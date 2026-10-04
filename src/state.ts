@@ -1,5 +1,6 @@
 import { findPosition, statusesFor } from './calc/engine';
 import { parseHours, parseMoney } from './calc/format';
+import type { FlightForm } from './calc/flights';
 import type { Payslip } from './calc/payslip';
 import type { Category, MonthInput, PeriodInput, Regulation, Settings } from './calc/types';
 import { DEFAULT_SETTINGS } from './calc/types';
@@ -18,6 +19,8 @@ export interface PeriodForm {
   statusId: string;
   salary: string;
   rate: string;
+  /** Журнал рейсов; если не пуст — часы периода считаются из него. */
+  flights: FlightForm[];
 }
 
 export interface ExtraForm {
@@ -108,6 +111,7 @@ export function defaultPeriod(reg: Regulation, category: Category = 'pilot'): Pe
     statusId: statusesFor(reg, category)[0]?.id ?? '',
     salary: '',
     rate: String(isPilot ? reg.pilot.defaultRate : reg.cabin.defaultRate),
+    flights: [],
   };
 }
 
@@ -132,6 +136,19 @@ export function sanitize(reg: Regulation, s: Partial<AppState>): AppState {
     if (!findPosition(reg, merged.category, merged.positionId)) merged.positionId = base.positionId;
     if (!statusesFor(reg, merged.category).some((st) => st.id === merged.statusId)) merged.statusId = base.statusId;
     if (!Number.isInteger(merged.aircraft) || merged.aircraft >= reg.aircraft.length) merged.aircraft = -1;
+    merged.flights = Array.isArray(merged.flights)
+      ? merged.flights
+          .filter((f) => f && typeof f.id === 'string')
+          .map((f) => ({
+            id: f.id,
+            date: String(f.date ?? ''),
+            route: String(f.route ?? ''),
+            block: String(f.block ?? ''),
+            night: String(f.night ?? ''),
+            duty: String(f.duty ?? ''),
+            dh: Boolean(f.dh),
+          }))
+      : [];
     return merged;
   });
   const extras = Array.isArray(s.extras)

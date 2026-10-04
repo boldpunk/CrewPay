@@ -4,12 +4,22 @@ import { availableAircraft, calculateMonth, findPosition, positionsFor, statuses
 import { coef, hours as fmtHours, money, num, parseHours, parseMoney } from './calc/format';
 import { formatDate, paymentSchedule, workingDays } from './calc/paydates';
 import { type ReconRow, reconcile } from './calc/payslip';
+import {
+  type FlightForm,
+  formatDuration,
+  isPublicHoliday,
+  normalizeRoute,
+  parseQuickLine,
+  summarizeFlights,
+  validRoute,
+} from './calc/flights';
 import { type Account, ApiError, type ServerProfile, type UploadedPayslip, api } from './api';
 import type { Category, MonthResult, Regulation, ResolvedPosition } from './calc/types';
 import {
   type AppState,
   type Backup,
   type HistoryEntry,
+  type PeriodForm,
   type Profile,
   type Theme,
   EXTRA_PRESETS,
@@ -30,7 +40,7 @@ import {
 } from './state';
 import { icon, logoMark } from './ui/icons';
 
-type View = 'calc' | 'history' | 'reference' | 'profile' | 'settings';
+type View = 'calc' | 'flights' | 'history' | 'reference' | 'profile' | 'settings';
 
 /** Сборка для предпросмотра во встроенном окне (claude.ai): там нет печати, скачивания файлов и service worker. */
 const IS_EMBED = import.meta.env.VITE_TARGET === 'embed';
@@ -220,11 +230,14 @@ function searchPositions(query: string, category: Category): PositionOption[] {
 
 const TABS: [View, string, string][] = [
   ['calc', 'Расчёт', 'calc'],
+  ['flights', 'Рейсы', 'plane'],
   ['history', 'История', 'history'],
   ['reference', 'Справочник', 'book'],
   ['profile', 'Профиль', 'user'],
   ['settings', 'Настройки', 'sliders'],
 ];
+/** На телефоне 5 вкладок; «Настройки» открываются из профиля. */
+const MOBILE_TABS = TABS.filter(([id]) => id !== 'settings');
 
 function renderShell() {
   const ini = profile?.name ? initials(profile.name) : '';
@@ -264,9 +277,9 @@ function renderShell() {
       </div>
     </footer>
     <nav class="tabbar" aria-label="Разделы">
-      ${TABS.map(
+      ${MOBILE_TABS.map(
         ([id, label, ic]) =>
-          `<button class="tab${view === id ? ' active' : ''}" data-view="${id}" ${view === id ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></button>`,
+          `<button class="tab${view === id || (id === 'profile' && view === 'settings') ? ' active' : ''}" data-view="${id}" ${view === id ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></button>`,
       ).join('')}
     </nav>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -286,6 +299,7 @@ function go(v: View) {
 function renderView() {
   const root = $('#view')!;
   if (view === 'calc') renderCalc(root);
+  else if (view === 'flights') renderFlights(root);
   else if (view === 'reference') renderReference(root);
   else if (view === 'history') renderHistory(root);
   else if (view === 'profile') renderProfile(root);
@@ -489,9 +503,16 @@ function renderCalc(root: HTMLElement) {
             ? ''
             : `
         <div class="card">
-          <div class="card-head">${icon('clock')}<h2>Налёт за ${multi ? 'период' : 'месяц'}</h2><span class="muted small head-note">можно 65:30</span></div>
-          <div class="grid2">
-            ${field('hours', 'Фактический налёт', p.hours, { suffix: 'ч', ic: 'clock', hint: 'Всего, с ночными и праздничными' })}
+          <div class="card-head">${icon('clock')}<h2>Налёт за ${multi ? 'период' : 'месяц'}</h2>${
+            p.flights.length
+              ? ''
+              : `<button class="chip head-note-btn" data-go="flights">${icon('plane')}По рейсам</button>`
+          }</div>
+          ${
+            p.flights.length
+              ? fromLogHtml(p)
+              : `<div class="grid2">
+            ${field('hours', 'Фактический налёт', p.hours, { suffix: 'ч', ic: 'clock', hint: 'Всего, с ночными и праздничными. Можно 65:30' })}
             ${field('nightHours', 'Из них ночной', p.nightHours, { suffix: 'ч', ic: 'moon' })}
             ${field('holidayHours', 'Из них праздничный', p.holidayHours, { suffix: 'ч', ic: 'star' })}
             ${field('nightHolidayHours', 'Ночью в праздник', p.nightHolidayHours, { suffix: 'ч', ic: 'moon', hint: 'Входят и в ночные, и в праздничные' })}
@@ -503,7 +524,8 @@ function renderCalc(root: HTMLElement) {
                   ? `Фактические часы; оплата ${num(reg.constants.deadheadMultiplier * 100)} %`
                   : 'Не оплачивается',
             })}
-          </div>
+          </div>`
+          }
         </div>`
         }
 
@@ -730,6 +752,27 @@ function currentRecon(): ReconRow[] {
   }
 }
 
+/** Налёт из журнала рейсов — только просмотр, правка на странице «Рейсы». */
+function fromLogHtml(p: PeriodForm): string {
+  const t = summarizeFlights(reg, state.month, p.flights);
+  const errs = t.issues.filter((i) => i.severity === 'error').length;
+  const row = (label: string, min: number, ic: string) =>
+    min ? `<li>${icon(ic)}<span>${label}</span><b>${formatDuration(min)}</b><span class="muted">${num(Math.round((min / 60) * 100) / 100)} ч</span></li>` : '';
+  return `
+    <div class="from-log">
+      <p class="muted small">Из журнала: ${t.count} ${plural(t.count, 'рейс', 'рейса', 'рейсов')}${errs ? ` · <span class="danger">${errs} с ошибками</span>` : ''}</p>
+      <ul class="kv-time">
+        ${row('Налёт', t.flightMin, 'clock')}
+        ${row('Ночные', t.nightMin, 'moon')}
+        ${row('Праздничные', t.holidayMin, 'star')}
+        ${row('Ночью в праздник', t.nightHolidayMin, 'moon')}
+        ${row('Dead Head', t.deadheadMin, 'plane')}
+        ${row('Рабочее время', t.dutyMin, 'briefcase')}
+      </ul>
+      <button class="btn small" data-go="flights">${icon('plane')}Открыть рейсы</button>
+    </div>`;
+}
+
 function selectPosition(root: HTMLElement, category: Category, id: string) {
   const p = period();
   const prevSalary = salaryFor(findPosition(reg, p.category, p.positionId));
@@ -852,6 +895,7 @@ function rememberSalary(raw: string) {
 
 function bindCalc(root: HTMLElement) {
   bindUpload(root);
+  root.querySelectorAll<HTMLButtonElement>('[data-go=flights]').forEach((b) => b.addEventListener('click', () => go('flights')));
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input, select').forEach((el) => {
     if (el.id === 'pos-input') return;
     // На телефоне плавающий итог не должен закрывать поле над клавиатурой.
@@ -981,6 +1025,7 @@ function bindCalc(root: HTMLElement) {
       nightHolidayHours: '',
       deadheadHours: '',
       worked: '',
+      flights: [],
     });
     state.active = state.periods.length - 1;
     persist();
@@ -1001,7 +1046,7 @@ function bindCalc(root: HTMLElement) {
       return;
     const first = state.periods[0];
     state.periods = [
-      { ...first, hours: '', nightHours: '', holidayHours: '', nightHolidayHours: '', deadheadHours: '', worked: '' },
+      { ...first, hours: '', nightHours: '', holidayHours: '', nightHolidayHours: '', deadheadHours: '', worked: '', flights: [] },
     ];
     state.extras = [];
     state.active = 0;
@@ -1383,6 +1428,373 @@ async function saveToHistory() {
   toast(account ? `Сохранено в аккаунте: ${monthLabel(entry.month)}` : `Сохранено: ${monthLabel(entry.month)}`);
 }
 
+// ---------- рейсы ----------
+
+const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+
+/** Время без двоеточия: «600» → «6:00», «1302» → «13:02», «6.30» → «6:30». */
+function autoColon(v: string): string {
+  const t = v.trim();
+  if (/^\d{3,4}$/.test(t)) return `${Number(t.slice(0, -2))}:${t.slice(-2)}`;
+  return t.replace(/^(\d{1,3})[.,](\d{2})$/, '$1:$2');
+}
+
+const reverseRoute = (r: string) => normalizeRoute(r).split('-').reverse().join('-');
+
+/** Последний рейс по каждому маршруту — из журнала и истории: время подставляется само. */
+function routeMemory(): Map<string, FlightForm> {
+  const all = [
+    ...history.flatMap((h) => h.state.periods.flatMap((p) => p.flights ?? [])),
+    ...state.periods.flatMap((p) => p.flights),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+  const mem = new Map<string, FlightForm>();
+  for (const f of all) {
+    const r = normalizeRoute(f.route);
+    if (validRoute(r) && f.block.trim()) mem.set(r, f);
+  }
+  return mem;
+}
+
+/** Часы периода берутся из журнала рейсов. */
+function syncFlightsToPeriod(p: PeriodForm) {
+  const t = summarizeFlights(reg, state.month, p.flights);
+  const v = (x: number) => (x ? num(x) : '');
+  p.hours = v(t.hours);
+  p.nightHours = v(t.nightHours);
+  p.holidayHours = v(t.holidayHours);
+  p.nightHolidayHours = v(t.nightHolidayHours);
+  p.deadheadHours = v(t.deadheadHours);
+}
+
+function monthBounds(ym: string) {
+  const [y, m] = ym.split('-').map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return { min: `${ym}-01`, max: `${ym}-${String(last).padStart(2, '0')}` };
+}
+
+function defaultFlightDate(p: PeriodForm): string {
+  const last = [...p.flights].reverse().find((f) => f.date.startsWith(state.month));
+  if (last) return last.date;
+  const today = new Date();
+  const t = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  return t.startsWith(state.month) ? t : `${state.month}-01`;
+}
+
+function flightRow(f: FlightForm, issues: { field: string; message: string; severity: string }[]): string {
+  const { min, max } = monthBounds(state.month);
+  const holiday = !f.dh && isPublicHoliday(reg, f.date);
+  const bad = (field: string) => (issues.some((i) => i.field === field && i.severity === 'error') ? ' invalid' : '');
+  const time = (field: 'block' | 'night' | 'duty', label: string, ic: string) => `
+    <label class="fl-time">
+      <span>${icon(ic)}${label}</span>
+      <input type="text" inputmode="numeric" autocomplete="off" data-f="${field}" value="${esc(f[field])}" placeholder="0:00" class="${bad(field).trim()}" aria-label="${label}" />
+    </label>`;
+  return `
+    <li class="flight${f.dh ? ' is-dh' : ''}${holiday ? ' is-holiday' : ''}" data-id="${esc(f.id)}">
+      <div class="fl-top">
+        <input type="date" data-f="date" value="${esc(f.date)}" min="${min}" max="${max}" class="fl-date${bad('date')}" aria-label="Дата вылета" />
+        <input type="text" data-f="route" value="${esc(f.route)}" list="known-routes" placeholder="TAS-DXB" autocapitalize="characters" autocomplete="off" spellcheck="false" class="fl-route${bad('route')}" aria-label="Маршрут" />
+        <button type="button" class="chip dh${f.dh ? ' active' : ''}" data-act="dh" aria-pressed="${f.dh}" title="Перелёт пассажиром (Dead Head)">DH</button>
+      </div>
+      <div class="fl-times">
+        ${time('block', 'Полётное', 'clock')}
+        ${time('night', 'Ночные', 'moon')}
+        ${time('duty', 'Рабочее', 'briefcase')}
+      </div>
+      <div class="fl-foot">
+        ${holiday ? `<span class="tag holiday">${icon('star')}праздник — двойная оплата</span>` : ''}
+        ${f.dh ? `<span class="tag">${icon('plane')}Dead Head · ${num(reg.constants.deadheadMultiplier * 100)} %</span>` : ''}
+        <span class="fl-issues">${issues.map((i) => `<span class="${i.severity}">${esc(i.message)}</span>`).join('')}</span>
+        <span class="fl-actions">
+          <button type="button" class="icon-btn small" data-act="reverse" title="Обратный рейс" aria-label="Добавить обратный рейс">${icon('refresh')}</button>
+          <button type="button" class="icon-btn small" data-act="delete" title="Удалить" aria-label="Удалить рейс">${icon('trash')}</button>
+        </span>
+      </div>
+    </li>`;
+}
+
+function flightTotalsHtml(): string {
+  const p = period();
+  const t = summarizeFlights(reg, state.month, p.flights);
+  const tile = (label: string, min: number, ic: string, accent = '') => `
+    <div class="ft-tile${accent}">
+      <span class="ft-label">${icon(ic)}${label}</span>
+      <b>${formatDuration(min)}</b>
+      <span class="muted small">${num(Math.round((min / 60) * 100) / 100)} ч</span>
+    </div>`;
+  return `
+    ${tile('Налёт', t.flightMin, 'plane', ' main')}
+    ${tile('Ночные', t.nightMin, 'moon')}
+    ${tile('Праздники', t.holidayMin, 'star')}
+    ${tile('DH', t.deadheadMin, 'plane')}
+    ${tile('Рабочее', t.dutyMin, 'briefcase')}
+    <div class="ft-tile">
+      <span class="ft-label">${icon('calendar')}Рейсов</span>
+      <b>${t.count}</b>
+      <span class="muted small">${new Set(p.flights.filter((f) => f.route.trim()).map((f) => f.date)).size} дн.</span>
+    </div>`;
+}
+
+function renderFlights(root: HTMLElement) {
+  document.body.classList.remove('typing');
+  const p = period();
+  const t = summarizeFlights(reg, state.month, p.flights);
+  const order = [...p.flights].sort((a, b) => a.date.localeCompare(b.date));
+  const multi = state.periods.length > 1;
+  const mem = routeMemory();
+  const result = calculateMonth(reg, state.settings, toMonthInput(state));
+  const netOk = !result.errors.length && state.norm.trim() !== '';
+
+  root.innerHTML = `
+    <section class="page flights-page">
+      <div class="page-head">
+        <h1>Рейсы</h1>
+        <p class="muted">Вводите каждый рейс — налёт, ночные и праздничные часы месяца посчитаются сами и попадут в расчёт.</p>
+      </div>
+
+      <div class="card">
+        <div class="month-stepper">
+          <button class="icon-btn" data-fmonth="-1" aria-label="Предыдущий месяц">${icon('chevron', 'icon rot90')}</button>
+          <div class="month-pick static">${icon('calendar')}<span class="month-name">${esc(monthLabel(state.month))}</span></div>
+          <button class="icon-btn" data-fmonth="1" aria-label="Следующий месяц">${icon('chevron', 'icon rot-90')}</button>
+        </div>
+        ${
+          multi
+            ? `<div class="periods">${state.periods
+                .map((_, i) => `<button class="chip${i === state.active ? ' active' : ''}" data-fperiod="${i}">Период ${i + 1}</button>`)
+                .join('')}</div>`
+            : ''
+        }
+        <div class="ft-grid" id="ft-totals">${flightTotalsHtml()}</div>
+        <div id="ft-gauge">${gauge()}</div>
+      </div>
+
+      <form class="card quick" id="quick-form" autocomplete="off">
+        <div class="card-head">${icon('sparkle')}<h2>Быстрый ввод</h2></div>
+        <div class="quick-row">
+          <input type="text" id="quick-input" placeholder="05.08 TAS-DXB 6:00 3:02 9:42" aria-label="Рейс одной строкой" spellcheck="false" />
+          <button class="btn primary" type="submit" aria-label="Добавить">${icon('plus')}<span class="btn-text">Добавить</span></button>
+        </div>
+        <p class="field-hint">Порядок: дата, маршрут, полётное, ночные, рабочее. <b>DH</b> — перелёт пассажиром. Можно вставить сразу несколько строк.</p>
+      </form>
+
+      <div class="card">
+        <div class="card-head">${icon('plane')}<h2>Журнал${multi ? ` · период ${state.active + 1}` : ''}</h2><span class="muted small head-note">${t.count} ${plural(t.count, 'рейс', 'рейса', 'рейсов')}</span></div>
+        ${
+          order.length
+            ? `<ul class="flight-list" id="flight-list">${order.map((f) => flightRow(f, t.issues.filter((i) => i.id === f.id))).join('')}</ul>`
+            : `<div class="empty-flights">${icon('plane', 'icon empty-icon')}<p>Рейсов пока нет. Добавьте первый строкой выше или кнопкой ниже.</p></div>`
+        }
+        <datalist id="known-routes">${[...mem.keys()].map((r) => `<option value="${esc(r)}"></option>`).join('')}</datalist>
+        <div class="form-actions">
+          <button class="btn" data-act="add">${icon('plus')}Рейс</button>
+          ${p.flights.length ? `<button class="btn ghost danger" data-act="clear">${icon('trash')}Очистить месяц</button>` : ''}
+        </div>
+      </div>
+
+      <button class="card to-calc" data-go="calc">
+        <span>${icon('wallet')}<span>${netOk ? 'К выплате' : 'Перейти к расчёту'}</span></span>
+        <b>${netOk ? `${money(result.net)} сум` : ''}</b>${icon('chevron', 'icon rot-90')}
+      </button>
+    </section>`;
+
+  bindFlights(root);
+}
+
+function refreshFlightSummary(root: HTMLElement) {
+  const p = period();
+  const t = summarizeFlights(reg, state.month, p.flights);
+  const totals = $('#ft-totals', root);
+  if (totals) totals.innerHTML = flightTotalsHtml();
+  const g = $('#ft-gauge', root);
+  if (g) g.innerHTML = gauge();
+  // Подсветка ошибок по строкам без перерисовки полей.
+  root.querySelectorAll<HTMLElement>('.flight').forEach((li) => {
+    const issues = t.issues.filter((i) => i.id === li.dataset.id);
+    li.querySelectorAll<HTMLInputElement>('[data-f]').forEach((el) =>
+      el.classList.toggle('invalid', issues.some((i) => i.field === el.dataset.f && i.severity === 'error')),
+    );
+    const box = li.querySelector('.fl-issues');
+    if (box) box.innerHTML = issues.map((i) => `<span class="${i.severity}">${esc(i.message)}</span>`).join('');
+  });
+  const result = calculateMonth(reg, state.settings, toMonthInput(state));
+  const b = $('.to-calc b', root);
+  if (b) b.textContent = !result.errors.length && state.norm.trim() !== '' ? `${money(result.net)} сум` : '';
+}
+
+function commitFlights(root: HTMLElement, rerender: boolean) {
+  const p = period();
+  if (p.flights.length) syncFlightsToPeriod(p);
+  persist();
+  if (rerender) renderFlights(root);
+  else refreshFlightSummary(root);
+}
+
+function addFlights(root: HTMLElement, items: Omit<FlightForm, 'id'>[], focusField?: string) {
+  const p = period();
+  const added = items.map((x) => ({ ...x, id: newId() }));
+  p.flights.push(...added);
+  commitFlights(root, true);
+  if (focusField && added.length === 1)
+    $<HTMLInputElement>(`.flight[data-id="${added[0].id}"] [data-f="${focusField}"]`, root)?.focus();
+}
+
+function bindFlights(root: HTMLElement) {
+  root.querySelectorAll<HTMLButtonElement>('[data-go=calc]').forEach((b) => b.addEventListener('click', () => go('calc')));
+  root.querySelectorAll<HTMLButtonElement>('[data-fmonth]').forEach((b) =>
+    b.addEventListener('click', () => {
+      state.month = shiftMonth(state.month, Number(b.dataset.fmonth));
+      if (state.payslip?.parsed.month !== state.month) state.payslip = null;
+      persist();
+      renderFlights(root);
+    }),
+  );
+  root.querySelectorAll<HTMLButtonElement>('[data-fperiod]').forEach((b) =>
+    b.addEventListener('click', () => {
+      state.active = Number(b.dataset.fperiod);
+      persist();
+      renderFlights(root);
+    }),
+  );
+
+  const quick = $<HTMLInputElement>('#quick-input', root)!;
+  const addQuick = (text: string) => {
+    const lines = text.split(/\r?\n/).map((l) => parseQuickLine(l, state.month)).filter((x) => x !== null);
+    if (!lines.length) return toast('Не понял строку — пример: 05.08 TAS-DXB 6:00 3:02 9:42');
+    const mem = routeMemory();
+    const p = period();
+    let lastDate = defaultFlightDate(p);
+    const items = lines.map((l) => {
+      const known = !l.block && validRoute(l.route) ? mem.get(l.route) : undefined;
+      lastDate = l.date ?? lastDate;
+      return {
+        date: lastDate,
+        route: l.route,
+        block: l.block || known?.block || '',
+        night: l.night || (l.block ? '' : known?.night || ''),
+        duty: l.duty || (l.block ? '' : known?.duty || ''),
+        dh: l.dh,
+      };
+    });
+    addFlights(root, items);
+    toast(items.length === 1 ? `Добавлен ${items[0].route || 'рейс'}` : `Добавлено рейсов: ${items.length}`);
+    $<HTMLInputElement>('#quick-input', root)?.focus();
+  };
+  $<HTMLFormElement>('#quick-form', root)!.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (quick.value.trim()) addQuick(quick.value);
+  });
+  quick.addEventListener('paste', (e) => {
+    const text = e.clipboardData?.getData('text') ?? '';
+    if (/\n/.test(text.trim())) {
+      e.preventDefault();
+      addQuick(text);
+    }
+  });
+  quick.addEventListener('focus', () => document.body.classList.add('typing'));
+  quick.addEventListener('blur', () => document.body.classList.remove('typing'));
+
+  const list = $('#flight-list', root);
+  const findFlight = (el: Element) => {
+    const id = el.closest<HTMLElement>('.flight')?.dataset.id;
+    return period().flights.find((f) => f.id === id);
+  };
+
+  list?.addEventListener('input', (e) => {
+    const el = e.target as HTMLInputElement;
+    const f = findFlight(el);
+    const field = el.dataset.f as keyof FlightForm | undefined;
+    if (!f || !field || field === 'id' || field === 'dh') return;
+    f[field] = el.value;
+    commitFlights(root, false);
+  });
+  list?.addEventListener('focusin', () => document.body.classList.add('typing'));
+  list?.addEventListener(
+    'blur',
+    (e) => {
+      document.body.classList.remove('typing');
+      const el = e.target as HTMLInputElement;
+      const f = findFlight(el);
+      if (!f) return;
+      const field = el.dataset.f;
+      if (field === 'block' || field === 'night' || field === 'duty') {
+        const v = autoColon(el.value);
+        if (v !== el.value) {
+          el.value = v;
+          f[field] = v;
+          commitFlights(root, false);
+        }
+      } else if (field === 'route') {
+        const r = normalizeRoute(el.value);
+        el.value = r;
+        f.route = r;
+        // Знакомый маршрут — время из прошлого рейса.
+        const known = routeMemory().get(r);
+        if (known && known.id !== f.id && !f.block && !f.night && !f.duty) {
+          Object.assign(f, { block: known.block, night: known.night, duty: known.duty });
+          // Обновляем поля строки на месте — фокус пользователя не теряется.
+          const li = el.closest('.flight');
+          for (const k of ['block', 'night', 'duty'] as const) {
+            const inp = li?.querySelector<HTMLInputElement>(`[data-f="${k}"]`);
+            if (inp && document.activeElement !== inp) inp.value = f[k];
+          }
+          toast(`Время ${r} подставлено из прошлого рейса`);
+        }
+        commitFlights(root, false);
+      } else if (field === 'date') {
+        // Отметка «праздник» по новой дате — без перерисовки списка (порядок обновится при следующем открытии).
+        const li = el.closest<HTMLElement>('.flight');
+        const holiday = !f.dh && isPublicHoliday(reg, f.date);
+        li?.classList.toggle('is-holiday', holiday);
+        const foot = li?.querySelector('.fl-foot');
+        const tag = foot?.querySelector('.tag.holiday');
+        if (holiday && !tag) foot?.insertAdjacentHTML('afterbegin', `<span class="tag holiday">${icon('star')}праздник — двойная оплата</span>`);
+        if (!holiday) tag?.remove();
+        commitFlights(root, false);
+      }
+    },
+    true,
+  );
+
+  list?.addEventListener('click', async (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-act]');
+    if (!btn) return;
+    const f = findFlight(btn);
+    if (!f) return;
+    const p = period();
+    if (btn.dataset.act === 'dh') {
+      f.dh = !f.dh;
+      commitFlights(root, true);
+    } else if (btn.dataset.act === 'delete') {
+      if ((f.route || f.block) && !(await ask(`Удалить рейс ${f.route || ''}?`, 'Удалить', true))) return;
+      p.flights = p.flights.filter((x) => x.id !== f.id);
+      if (!p.flights.length) syncFlightsToPeriod(p);
+      commitFlights(root, true);
+    } else if (btn.dataset.act === 'reverse') {
+      const r = reverseRoute(f.route);
+      const known = validRoute(r) ? routeMemory().get(r) : undefined;
+      addFlights(
+        root,
+        [{ date: f.date, route: r, block: known?.block ?? '', night: known?.night ?? '', duty: known?.duty ?? '', dh: f.dh }],
+        known ? undefined : 'block',
+      );
+    }
+  });
+
+  root.querySelectorAll<HTMLButtonElement>('.form-actions [data-act=add]').forEach((b) =>
+    b.addEventListener('click', () =>
+      addFlights(root, [{ date: defaultFlightDate(period()), route: '', block: '', night: '', duty: '', dh: false }], 'route'),
+    ),
+  );
+  $('.form-actions [data-act=clear]', root)?.addEventListener('click', async () => {
+    if (!(await ask(`Удалить все рейсы ${monthFor(state.month)}?`, 'Удалить', true))) return;
+    const p = period();
+    p.flights = [];
+    syncFlightsToPeriod(p);
+    commitFlights(root, true);
+  });
+}
+
 // ---------- history ----------
 
 async function loadSlips(root: HTMLElement) {
@@ -1648,6 +2060,8 @@ function renderProfile(root: HTMLElement) {
         }
       </div>
 
+      <button class="card to-calc" data-goto="settings"><span>${icon('sliders')}<span>Настройки</span></span>${icon('chevron', 'icon rot-90')}</button>
+
       <div class="card">
         <div class="card-head">${icon('shield')}<h2>Хранение и перенос</h2></div>
         <p class="muted small">${
@@ -1685,6 +2099,7 @@ function renderProfile(root: HTMLElement) {
     toast('Профиль сохранён');
   });
 
+  $('[data-goto=settings]', root)?.addEventListener('click', () => go('settings'));
   root.querySelectorAll<HTMLButtonElement>('[data-auth]').forEach((b) =>
     b.addEventListener('click', () => {
       authMode = b.dataset.auth as 'login' | 'register';

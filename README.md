@@ -12,6 +12,10 @@
 - **Оклад подставляется сам**: из штатного расписания (`salary` в `regulation.json`) или личный — вводится один раз и запоминается для должности.
 - **Норма по календарю**: подсказки для пятидневки и шестидневки на выбранный месяц.
 - Пилоты: гарантия (табл. 2-1, 2-2, 2-5), норматив 20 ч (2-3, 2-4), свыше 94,5 ч; бортпроводники: до 70 / 70–100 / свыше 100 ч.
+- **Журнал рейсов** (страница «Рейсы»): каждый рейс — дата, маршрут, полётное, ночные, рабочее время, DH.
+  Быстрый ввод строкой `05.08 TAS-DXB 6:00 3:02 9:42`, вставка нескольких строк, обратный рейс в одно касание,
+  время знакомого маршрута подставляется само, рейсы в праздники отмечаются автоматически. Итоги считаются в минутах
+  и сразу попадают в расчёт.
 - Ночные, праздничные, ночь в праздник, Dead Head (50 %), статус допуска, перевод в течение месяца.
 - **Прочие начисления** из листка: надбавка, медосмотр, премия и др.
 - Шкала налёта с порогами, состав начисления, подсказки «сколько часов до…», сроки выплат.
@@ -62,29 +66,31 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
 | `PORT` | нет | По умолчанию 3000 |
 | `REGULATION_PATH` | нет | Путь к `regulation.json` вне образа — править ставки без релиза |
 
-## Деплой на сервер (как molly.uz)
+## Деплой на crewpay.uz (как molly.uz)
 
 Каждый push в `main`: тесты на Postgres → Docker-образ `ghcr.io/boldpunk/crewpay` → `docker compose up` на сервере по SSH.
 Пока секреты не заданы, образ собирается, а шаг деплоя пропускается.
 
-1. GitHub → Settings → Secrets and variables → Actions: `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, `DATABASE_URL`, `SITE_URL`
-   (и `POSTGRES_PASSWORD`, если база — в `docker compose --profile db` на этом же сервере).
-2. На сервере nginx проксирует домен на `127.0.0.1:3020` и передаёт протокол:
+**1. База на Neon.** console.neon.tech → New project `crewpay` (регион поближе, напр. Frankfurt) → Connection string
+(можно pooled, с `-pooler`). Таблицы сервер создаёт сам при первом запуске. Отдельный проект — не общая база с molly.
 
-```nginx
-server {
-    server_name crewpay.uz;
-    client_max_body_size 6m;
-    location / {
-        proxy_pass http://127.0.0.1:3020;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+**2. DNS.** У регистратора crewpay.uz: запись `A` для `crewpay.uz` и `www` → IP сервера, где работает molly.uz.
 
-3. HTTPS — `certbot --nginx -d crewpay.uz` (нужен для входа: cookie сессии только по HTTPS, и для установки PWA).
+**3. Секреты GitHub** (Settings → Secrets and variables → Actions):
+
+| Секрет | Значение |
+|---|---|
+| `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` | те же, что у molly.uz |
+| `DATABASE_URL` | строка подключения Neon (`postgresql://…neon.tech/…?sslmode=require`) |
+| `SITE_URL` | `https://crewpay.uz` |
+
+**4. nginx и HTTPS** на сервере — готовый файл [`deploy/nginx-crewpay.uz.conf`](deploy/nginx-crewpay.uz.conf)
+(проксирует на `127.0.0.1:3020`), затем `certbot --nginx -d crewpay.uz -d www.crewpay.uz`.
+HTTPS обязателен: cookie входа выдаётся только по HTTPS, и без него не установится PWA.
+
+**5.** Actions → CI & Deploy → Run workflow (или любой push в `main`). Проверка: `https://crewpay.uz/api/health` → `{"ok":true}`.
+
+Справочник ставок можно вынести на сервер (`REGULATION_PATH`, см. `docker-compose.yml`) и править без релиза.
 
 `npm run build:embed` собирает статический предпросмотр одним файлом (без сервера; `SEED=файл.json` встраивает аккаунт).
 

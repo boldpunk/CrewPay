@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { calculateMonth, findPosition, statusesFor } from '../src/calc/engine';
 import { money, num } from '../src/calc/format';
 import { formatDate, paymentSchedule } from '../src/calc/paydates';
+import { formatDuration, isPublicHoliday, normalizeRoute, parseDuration, summarizeFlights } from '../src/calc/flights';
 import type { ReconRow } from '../src/calc/payslip';
 import type { Regulation, Settings } from '../src/calc/types';
 import { type AppState, toMonthInput } from '../src/state';
@@ -314,6 +315,63 @@ export async function renderReport(reg: Regulation, input: ReportInput): Promise
   total('Начислено', plain(money(result.total)), { strong: true, rule: 0.6 });
   total(`НДФЛ ${num(reg.constants.incomeTaxRate * 100)} %, вкл. ИНПС`, `−${plain(money(result.tax))}`);
   total('К выплате', `${plain(money(result.net))} сум`, { strong: true, big: true, rule: 1.4 });
+
+  // ---------- журнал рейсов ----------
+  input.state.periods.forEach((per, pi) => {
+    const flights = (per.flights ?? []).filter((f) => f.route.trim() || f.block.trim());
+    if (!flights.length) return;
+    const ft = summarizeFlights(reg, input.month, flights);
+    const multiP = input.state.periods.length > 1;
+    sectionTitle(
+      multiP ? `Журнал рейсов · период ${pi + 1}` : 'Журнал рейсов',
+      `${ft.count} рейс. · налёт ${formatDuration(ft.flightMin)} (${num(ft.hours)} ч)`,
+    );
+    const cx = [M, M + 62, M + 190, M + 270, M + 350, M + 430];
+    const head = () => {
+      label('Дата', cx[0], y);
+      label('Маршрут', cx[1], y);
+      label('Полётное', cx[2], y, 70, 'right');
+      label('Ночные', cx[3], y, 70, 'right');
+      label('Рабочее', cx[4], y, 70, 'right');
+      label('Отметка', cx[5], y, W - (cx[5] - M), 'right');
+      y += 12;
+      doc.moveTo(M, y).lineTo(M + W, y).lineWidth(0.7).stroke(C.ink);
+      y += 5;
+    };
+    ensure(40);
+    head();
+    const sorted = [...flights].sort((a, b) => a.date.localeCompare(b.date));
+    for (const f of sorted) {
+      if (y + 16 > BOTTOM) {
+        ensure(200);
+        head();
+      }
+      const d = /^\d{4}-(\d{2})-(\d{2})$/.exec(f.date);
+      const holiday = !f.dh && isPublicHoliday(reg, f.date);
+      const dur = (v: string) => {
+        const m = parseDuration(v);
+        return Number.isFinite(m) && m > 0 ? formatDuration(m) : '—';
+      };
+      doc.font('mono').fontSize(8.2).fillColor(C.ink2).text(d ? `${d[2]}.${d[1]}` : f.date, cx[0], y, { lineBreak: false });
+      doc.font('mono').fontSize(8.2).fillColor(C.ink).text(normalizeRoute(f.route) || '—', cx[1], y, { lineBreak: false });
+      doc.font('mono').fontSize(8.2).fillColor(f.dh ? C.muted : C.ink).text(dur(f.block), cx[2], y, { width: 70, align: 'right', lineBreak: false });
+      doc.fillColor(C.ink2).text(dur(f.night), cx[3], y, { width: 70, align: 'right', lineBreak: false });
+      doc.text(dur(f.duty), cx[4], y, { width: 70, align: 'right', lineBreak: false });
+      const mark = f.dh ? 'Dead Head' : holiday ? 'праздник' : '';
+      if (mark)
+        doc.font('semi').fontSize(7.5).fillColor(f.dh ? C.muted : C.orange).text(mark, cx[5], y + 0.5, { width: W - (cx[5] - M), align: 'right', lineBreak: false });
+      y += 15;
+      doc.moveTo(M, y - 4).lineTo(M + W, y - 4).lineWidth(0.4).stroke(C.line);
+    }
+    ensure(18);
+    doc.font('semi').fontSize(8.5).fillColor(C.ink).text('Итого', cx[0], y, { lineBreak: false });
+    doc.font('mono').fontSize(8.2).text(formatDuration(ft.flightMin), cx[2], y, { width: 70, align: 'right', lineBreak: false });
+    doc.text(formatDuration(ft.nightMin), cx[3], y, { width: 70, align: 'right', lineBreak: false });
+    doc.text(formatDuration(ft.dutyMin), cx[4], y, { width: 70, align: 'right', lineBreak: false });
+    if (ft.deadheadMin)
+      doc.font('body').fontSize(7.5).fillColor(C.muted).text(`DH ${formatDuration(ft.deadheadMin)}`, cx[5], y + 0.5, { width: W - (cx[5] - M), align: 'right', lineBreak: false });
+    y += 20;
+  });
 
   // ---------- сверка ----------
   if (input.recon && input.recon.rows.length) {
