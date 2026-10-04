@@ -2,7 +2,7 @@
   "name": "crewpay",
   "private": true,
   "version": "1.0.0",
-  "description": "Калькулятор месячного налёта и сдельной оплаты экипажа по Положению MF.FD3-01",
+  "description": "Калькулятор месячного налёта и сдельной оплаты экипажа",
   "type": "module",
   "scripts": {
     "dev": "vite",
