@@ -146,7 +146,7 @@ export function calculatePeriod(
   if (position.needsAircraft) {
     if (p.aircraft < 0 || p.aircraft >= reg.aircraft.length) r.errors.push('Выберите тип ВС.');
     else if (!availableAircraft(reg, position).includes(p.aircraft))
-      r.errors.push(`Сочетание «${position.label}» × ${reg.aircraft[p.aircraft]} не предусмотрено Положением.`);
+      r.errors.push(`Сочетание «${position.label}» × ${reg.aircraft[p.aircraft]} недоступно.`);
     else ac = p.aircraft;
   }
   if (r.errors.length || !status) return r;
@@ -173,7 +173,7 @@ export function calculatePeriod(
     );
     if (H > reg.cabin.includedInSalary.hours)
       r.warnings.push(
-        `Налёт ${h(H)} ч больше ${reg.cabin.includedInSalary.hours} ч: оплата сверх этого Положением не определена — уточните в экономическом отделе.`,
+        `Налёт ${h(H)} ч больше ${reg.cabin.includedInSalary.hours} ч: оплата сверх этого не определена — уточните в экономическом отделе.`,
       );
   } else if (H === 0) {
     r.notes.push('Налёт 0 ч — сдельная часть не начисляется (п. 4.2).');

@@ -27,7 +27,7 @@ const seed =
     : '';
 
 const html = `<title>CrewPay</title>
-<meta name="description" content="Калькулятор месячного налёта и сдельной оплаты экипажа по Положению MF.FD3-01" />
+<meta name="description" content="Калькулятор месячного налёта и сдельной оплаты экипажа" />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Onest:wght@400;500;600;700&family=Unbounded:wght@500;600;700&display=swap" />
 ${seed}<style>
 ${css}

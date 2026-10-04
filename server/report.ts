@@ -252,7 +252,7 @@ export async function renderReport(reg: Regulation, input: ReportInput): Promise
   }
 
   // ---------- строки ----------
-  sectionTitle('Расчёт по строкам', 'по Положению ' + reg.regulation.code);
+  sectionTitle('Расчёт по строкам');
   const cTitle = 190;
   const cFormula = W - cTitle - 110;
   label('Вид начисления', M, y);
@@ -455,7 +455,7 @@ export async function renderReport(reg: Regulation, input: ReportInput): Promise
     doc.font('semi').fillColor(C.teal).text(` ${host}`, { link: input.siteUrl, underline: false, continued: true, lineBreak: false });
     doc.font('body').fillColor(C.muted).text(` · ${fmtDateTime(input.generatedAt)}`, { lineBreak: false });
     doc.font('body').fontSize(6.6).fillColor(C.muted).text(
-      `Справочный расчёт по Положению ${reg.regulation.code}; не заменяет расчётный листок работодателя.`,
+      'Справочный расчёт CrewPay; не заменяет расчётный листок работодателя.',
       M + 20,
       fy + 20,
       { lineBreak: false },

@@ -267,7 +267,7 @@ function renderShell() {
       <div class="footer-inner">
         <div class="footer-brand">
           ${logoMark(22)}
-          <span>© ${new Date().getFullYear()} CrewPay · Положение ${esc(reg.regulation.code)}</span>
+          <span>© ${new Date().getFullYear()} CrewPay</span>
         </div>
         <a class="credit" href="${CREDIT_URL}" target="_blank" rel="noopener">
           <span>Дизайн и разработка —</span>
@@ -476,7 +476,7 @@ function renderCalc(root: HTMLElement) {
               ${reg.aircraft
                 .map((a, i) => {
                   const ok = avail.includes(i);
-                  return `<button role="radio" class="ac${p.aircraft === i ? ' active' : ''}" data-aircraft="${i}" ${ok ? '' : 'disabled title="Не предусмотрено Положением для этой должности"'} aria-checked="${p.aircraft === i}">${esc(a)}</button>`;
+                  return `<button role="radio" class="ac${p.aircraft === i ? ' active' : ''}" data-aircraft="${i}" ${ok ? '' : 'disabled title="Недоступно для этой должности"'} aria-checked="${p.aircraft === i}">${esc(a)}</button>`;
                 })
                 .join('')}
             </div>
@@ -548,7 +548,7 @@ function renderCalc(root: HTMLElement) {
                     kind: 'money',
                     suffix: 'сум',
                     ic: 'coin',
-                    hint: `По Положению ${money(p.category === 'pilot' ? reg.pilot.defaultRate : reg.cabin.defaultRate)} (п. 2.5)`,
+                    hint: `По умолчанию ${money(p.category === 'pilot' ? reg.pilot.defaultRate : reg.cabin.defaultRate)}`,
                   })
             }
           </div>
@@ -1325,7 +1325,7 @@ function renderResult() {
       ${serverUp || CAN_PRINT ? `<button class="btn" data-action="pdf" ${ok ? '' : 'disabled'}>${icon('download')}PDF</button>` : ''}
     </div>
     <div class="print-only print-meta">
-      ${esc(monthLabel(state.month))} · ${esc(profile?.name ?? '')} · ${esc(result.periods.map((_, i) => describePeriod(i)).join('; '))} · CrewPay, Положение ${esc(reg.regulation.code)}
+      ${esc(monthLabel(state.month))} · ${esc(profile?.name ?? '')} · ${esc(result.periods.map((_, i) => describePeriod(i)).join('; '))} · CrewPay
     </div>
   `;
 
@@ -2396,12 +2396,11 @@ function coefCell(k: number | null) {
 function renderReference(root: HTMLElement) {
   const c = reg.constants;
   const acHead = reg.aircraft.map((a) => `<th>${esc(a)}</th>`).join('');
-  const r = reg.regulation;
   root.innerHTML = `
     <section class="page ref">
       <div class="page-head">
         <h1>Справочник</h1>
-        <p class="muted">Положение <b>${esc(r.code)}</b>, действует с ${esc(new Date(r.effectiveFrom).toLocaleDateString('ru-RU'))}. Прочерк — сочетание недоступно.</p>
+        <p class="muted">Ставки и коэффициенты, по которым идёт расчёт. Прочерк — сочетание недоступно.</p>
       </div>
 
       <div class="card">
