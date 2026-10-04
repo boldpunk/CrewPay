@@ -72,16 +72,34 @@ EDGE_NETWORK=$NET
 ENV
   echo "Сеть: $NET"
 
-  # Берём ДЕЙСТВУЮЩИЙ конфиг из контейнера: файл на хосте мог отстать (см. docs Fyndue про inode).
-  RUNNING=$(mktemp)
-  NEW=$(mktemp)
-  $DOCKER exec "$EDGE" cat /etc/caddy/Caddyfile > "$RUNNING"
+  # Какой конфиг сейчас настоящий, неочевидно: файл в контейнере мог отстать от файла на хосте (inode),
+  # а другой проект мог перезагрузить Caddy из копии в /tmp. Собираем всех кандидатов и берём тот,
+  # в котором есть все сайты остальных (свой домен не считаем). Если такого нет — ничего не трогаем.
+  WORK=$(mktemp -d)
   STAMP=$(date +%Y%m%d-%H%M%S)
-  cp "$RUNNING" "$APP_DIR/Caddyfile.running.$STAMP.bak"
-  if [ -n "$HOST_FILE" ]; then $SUDO cp "$HOST_FILE" "$APP_DIR/Caddyfile.host.$STAMP.bak" 2>/dev/null || true; fi
+  n=0
+  add_candidate() { n=$((n + 1)); cp "$1" "$WORK/cand$n"; echo "$2" > "$WORK/cand$n.src"; }
+  sites_of() { grep -E '^[^#[:space:]][^{]*\{[[:space:]]*$' "$1" | sed 's/{.*$//' | tr ', \t' '\n\n\n' | grep -v '^$' | grep -vE "^(www\.)?$DOMAIN$" | sort -u; }
+  $DOCKER exec "$EDGE" cat /etc/caddy/Caddyfile > "$WORK/x" && add_candidate "$WORK/x" "container:/etc/caddy/Caddyfile"
+  for f in $($DOCKER exec "$EDGE" sh -c 'ls /tmp/Caddyfile* 2>/dev/null' || true); do
+    $DOCKER exec "$EDGE" cat "$f" > "$WORK/x" && add_candidate "$WORK/x" "container:$f"
+  done
+  if [ -n "$HOST_FILE" ]; then $SUDO cat "$HOST_FILE" > "$WORK/x" && add_candidate "$WORK/x" "host:$HOST_FILE"; fi
+  for i in $(seq 1 $n); do
+    cp "$WORK/cand$i" "$APP_DIR/Caddyfile.cand$i.$STAMP.bak"
+    sites_of "$WORK/cand$i" > "$WORK/cand$i.sites"
+  done
+  sort -u "$WORK"/cand*.sites > "$WORK/all.sites"
+  BASE=""
+  for i in $(seq 1 $n); do
+    if [ -z "$(comm -23 "$WORK/all.sites" "$WORK/cand$i.sites")" ]; then BASE="$WORK/cand$i"; echo "Основа: $(cat "$WORK/cand$i.src")"; break; fi
+  done
+  [ -n "$BASE" ] || die "Конфиги Caddy расходятся, ни один не содержит всех сайтов — ничего не изменено. Копии в $APP_DIR."
+  echo "Сайты: $(tr '\n' ' ' < "$WORK/all.sites")"
 
-  cp "$RUNNING" "$NEW"
-  if grep -qE "^[[:space:]]*$DOMAIN[[:space:]]*\{" "$RUNNING"; then
+  NEW="$WORK/new"
+  cp "$BASE" "$NEW"
+  if grep -qE "^[[:space:]]*$DOMAIN[[:space:]]*\{" "$BASE"; then
     say "Блок $DOMAIN уже есть в конфиге Caddy"
   else
     {
@@ -104,26 +122,44 @@ ENV
     } >> "$NEW"
   fi
 
+  # Какие соседние сайты отвечают сейчас — после перезагрузки они обязаны отвечать так же.
+  probe() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$1/" || true; }
+  : > "$WORK/before"
+  while read -r site; do
+    [ -n "$site" ] && echo "$site $(probe "$site")" >> "$WORK/before"
+  done < "$WORK/all.sites"
+
   # Проверка и перезагрузка из копии внутри контейнера — ошибка в конфиге не уронит другие сайты.
   $DOCKER cp "$NEW" "$EDGE:/tmp/Caddyfile.crewpay"
   if ! $DOCKER exec "$EDGE" caddy validate --config /tmp/Caddyfile.crewpay --adapter caddyfile >/dev/null 2>&1; then
-    die "Новый конфиг Caddy не прошёл проверку — ничего не изменено. Резервные копии в $APP_DIR."
+    die "Новый конфиг Caddy не прошёл проверку — ничего не изменено. Копии в $APP_DIR."
   fi
   $DOCKER exec "$EDGE" caddy reload --config /tmp/Caddyfile.crewpay --adapter caddyfile
-  echo "Caddy перезагружен с блоком $DOMAIN"
+  echo "Caddy перезагружен"
+  sleep 5
 
-  # Записываем обратно в тот же файл (tee сохраняет inode), чтобы рестарт контейнера не потерял сайты.
+  # Сайты, которые работали до изменения, должны работать и после — иначе откат.
+  broken=""
+  while read -r site code; do
+    [ "$code" = "000" ] && continue
+    now=$(probe "$site")
+    echo "  $site: $code → $now"
+    [ "$now" = "000" ] && broken="$broken $site"
+  done < "$WORK/before"
+  if [ -n "$broken" ]; then
+    $DOCKER cp "$BASE" "$EDGE:/tmp/Caddyfile.crewpay-rollback"
+    $DOCKER exec "$EDGE" caddy reload --config /tmp/Caddyfile.crewpay-rollback --adapter caddyfile
+    die "После изменения перестали отвечать:$broken — конфиг Caddy возвращён как был."
+  fi
+
+  # Записываем в тот же файл на хосте (tee сохраняет inode), чтобы рестарт Caddy не потерял сайты.
   if [ -n "$HOST_FILE" ]; then
     $SUDO tee "$HOST_FILE" < "$NEW" >/dev/null
-    if $DOCKER exec "$EDGE" cat /etc/caddy/Caddyfile | cmp -s - "$NEW"; then
-      echo "Файл $HOST_FILE обновлён"
-    else
-      warn "Контейнер видит старую копию файла — после рестарта $EDGE он подхватит новый $HOST_FILE."
-    fi
+    echo "Файл $HOST_FILE обновлён (все сайты: $(sites_of "$NEW" | tr '\n' ' ')+ $DOMAIN)"
   else
     warn "Caddyfile не смонтирован из файла — блок действует до рестарта $EDGE; добавьте его в конфиг проекта."
   fi
-  rm -f "$RUNNING" "$NEW"
+  rm -rf "$WORK"
   MODE=shared-caddy
 else
   # ================= nginx =================
