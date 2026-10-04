@@ -1,30 +1,72 @@
+# CrewPay: приложение + своя база Postgres + ночные резервные копии.
+#   docker compose up -d
+# База доступна только внутри сети проекта (имя crewpay-db), наружу не открыта.
+# Пароль базы — в .env (POSTGRES_PASSWORD); деплой генерирует его один раз и хранит в /opt/crewpay/db.env.
+# Внешняя база (Neon, Supabase…) — задайте DATABASE_URL, тогда своя не используется.
+name: crewpay
+
 services:
   web:
     image: ghcr.io/boldpunk/crewpay:latest
     build: .
     restart: unless-stopped
     env_file: .env
-    # Только localhost — TLS и 80/443 держит nginx/caddy на сервере.
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://crewpay:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@crewpay-db:5432/crewpay}
+    # Только localhost — HTTPS и 80/443 держит Caddy/nginx сервера.
     ports:
       - "127.0.0.1:3020:3000"
+    depends_on:
+      db:
+        condition: service_healthy
     # Справочник ставок можно править на сервере без релиза:
-    # положите regulation.json рядом и раскомментируйте, затем REGULATION_PATH=/app/config/regulation.json в .env
+    # положите regulation.json рядом, раскомментируйте и добавьте REGULATION_PATH=/app/config/regulation.json в .env
     # volumes:
     #   - ./regulation.json:/app/config/regulation.json:ro
 
-  # Свой Postgres на этом же сервере (если не используете Neon):
-  #   docker compose --profile db up -d
-  #   DATABASE_URL=postgresql://crewpay:<пароль>@db:5432/crewpay в .env
   db:
     image: postgres:16-alpine
-    profiles: ["db"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: crewpay
       POSTGRES_DB: crewpay
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}  # обязателен, если запускаете профиль db
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      default:
+        # Не «db»: web подключён ещё и к сети общего Caddy, где «db» может оказаться чужой базой.
+        aliases: [crewpay-db]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crewpay -d crewpay"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Каждую ночь — сжатая копия базы в ./backups, хранятся последние 14 дней.
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: crewpay-db
+      PGUSER: crewpay
+      PGDATABASE: crewpay
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./backups:/backups
+    entrypoint:
+      - sh
+      - -c
+      - |
+        while true; do
+          f=/backups/crewpay-$$(date +%Y-%m-%d).sql.gz
+          if pg_dump --no-owner | gzip > "$$f.tmp"; then mv "$$f.tmp" "$$f"; echo "backup ok: $$f"; else rm -f "$$f.tmp"; echo "backup FAILED"; fi
+          find /backups -name 'crewpay-*.sql.gz' -mtime +14 -delete
+          sleep 86400
+        done
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   pgdata:

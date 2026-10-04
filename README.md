@@ -61,7 +61,7 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
 
 | Переменная | Обязательна | Назначение |
 |---|---|---|
-| `DATABASE_URL` | да | Postgres (Neon или свой). Таблицы создаются при запуске |
+| `DATABASE_URL` | нет | Внешний Postgres (Neon, Supabase…). Без него — своя база в Docker (`docker-compose.yml`). Таблицы создаются при запуске |
 | `SITE_URL` | да в продакшене | Адрес сайта для ссылки в PDF, напр. `https://crewpay.uz` |
 | `PORT` | нет | По умолчанию 3000 |
 | `REGULATION_PATH` | нет | Путь к `regulation.json` вне образа — править ставки без релиза |
@@ -71,8 +71,11 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
 Каждый push в `main`: тесты на Postgres → Docker-образ `ghcr.io/boldpunk/crewpay` → `docker compose up` на сервере по SSH.
 Пока секреты не заданы, образ собирается, а шаг деплоя пропускается.
 
-**1. База на Neon.** console.neon.tech → New project `crewpay` (регион поближе, напр. Frankfurt) → Connection string
-(можно pooled, с `-pooler`). Таблицы сервер создаёт сам при первом запуске. Отдельный проект — не общая база с molly.
+**1. База.** По умолчанию — своя Postgres в Docker рядом с приложением (`crewpay-db`, наружу не открыта).
+Пароль деплой генерирует один раз и хранит на сервере в `/opt/crewpay/db.env`. Каждую ночь — сжатая копия в
+`/opt/crewpay/backups` (последние 14 дней). Восстановление:
+`gunzip -c backups/crewpay-ГГГГ-ММ-ДД.sql.gz | docker compose exec -T db psql -U crewpay crewpay`.
+Внешняя база вместо своей — секрет `DATABASE_URL`.
 
 **2. DNS.** У регистратора crewpay.uz: запись `A` для `crewpay.uz` и `www` → IP сервера, где работает molly.uz.
 
@@ -81,7 +84,6 @@ pdfkit со шрифтами Onest / Unbounded / JetBrains Mono (отчёты). 
 | Секрет | Значение |
 |---|---|
 | `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` | те же, что у molly.uz |
-| `DATABASE_URL` | строка подключения Neon (`postgresql://…neon.tech/…?sslmode=require`) |
 | `SITE_URL` | `https://crewpay.uz` |
 
 **4. Сервер (Oracle Cloud dcau-hub, Ampere A1 / ARM).** Образ собирается для x86 и ARM.

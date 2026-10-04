@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import regJson from '../public/regulation.json';
 import { createApp } from '../server/app';
-import { connect, migrate } from '../server/db';
+import { connect, migrate, needsTls } from '../server/db';
 import { extractItems } from '../server/pdftext';
 import { parsePayslip, payslipToInput } from '../src/calc/payslip';
 import type { Regulation } from '../src/calc/types';
@@ -10,6 +10,15 @@ import { fakePayslipItems, fakePayslipPdf } from './fixtures/fake-payslip';
 
 const reg = regJson as Regulation;
 const URL_ = process.env.TEST_DATABASE_URL;
+
+describe('Подключение к базе', () => {
+  it('TLS — только для облачной базы', () => {
+    expect(needsTls('postgresql://crewpay:x@crewpay-db:5432/crewpay')).toBe(false);
+    expect(needsTls('postgresql://postgres@127.0.0.1:5433/crewpay')).toBe(false);
+    expect(needsTls('postgresql://u:p@ep-x-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require')).toBe(true);
+    expect(needsTls('postgresql://u:p@db.example.com/x?sslmode=disable')).toBe(false);
+  });
+});
 
 describe('Парсер расчётного листка (синтетический листок)', () => {
   it('читает шапку, начисления и удержания', () => {

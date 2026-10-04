@@ -78,7 +78,7 @@ jobs:
     steps:
       - name: Skip until the server is configured
         if: env.SSH_HOST == ''
-        run: echo "::notice::Секреты SSH_HOST/SSH_USER/SSH_PRIVATE_KEY/DATABASE_URL/SITE_URL не заданы — образ собран, деплой пропущен."
+        run: echo "::notice::Секреты SSH_HOST/SSH_USER/SSH_PRIVATE_KEY/SITE_URL не заданы — образ собран, деплой пропущен."
 
       - uses: actions/checkout@v4
         if: env.SSH_HOST != ''
@@ -91,11 +91,14 @@ jobs:
         run: |
           set -eu
           missing=""
-          for name in DATABASE_URL SITE_URL; do
+          for name in SITE_URL; do
             value=$(eval "printf '%s' \"\${$name:-}\"")
             [ -n "$value" ] || missing="$missing $name"
           done
-          case "${DATABASE_URL:-}" in postgresql://*|postgres://*) ;; *) missing="$missing DATABASE_URL(scheme)";; esac
+          # DATABASE_URL необязателен: без него используется своя база в Docker на сервере.
+          if [ -n "${DATABASE_URL:-}" ]; then
+            case "$DATABASE_URL" in postgresql://*|postgres://*) ;; *) missing="$missing DATABASE_URL(scheme)";; esac
+          fi
           if [ -n "$missing" ]; then echo "::error::Не заданы секреты:$missing"; exit 1; fi
 
       - name: Copy docker-compose.yml to server
@@ -122,8 +125,14 @@ jobs:
             cat > /opt/crewpay/.env <<'ENVEOF'
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             SITE_URL=${{ secrets.SITE_URL }}
-            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
             ENVEOF
+            # Пароль своей базы создаётся один раз и остаётся на сервере (в логи не попадает).
+            if [ ! -f /opt/crewpay/db.env ]; then
+              umask 077
+              echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" > /opt/crewpay/db.env
+            fi
+            cat /opt/crewpay/db.env >> /opt/crewpay/.env
+            mkdir -p /opt/crewpay/backups
             # Режим «общий Caddy» (сеть другого проекта) — его записал deploy/setup-oracle.sh.
             [ -f /opt/crewpay/edge.env ] && cat /opt/crewpay/edge.env >> /opt/crewpay/.env
             chmod 600 /opt/crewpay/.env
@@ -139,9 +148,9 @@ jobs:
             set -eu
             cd /opt/crewpay
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-            docker compose pull web
-            docker compose up -d web
-            sleep 8
-            docker compose ps web
+            docker compose pull
+            docker compose up -d --remove-orphans
+            sleep 10
+            docker compose ps
             curl -fsS --max-time 5 http://127.0.0.1:3020/api/health && echo " ← приложение отвечает"
             docker image prune -f

@@ -64,10 +64,10 @@ jobs:
                 echo "== снаружи"; curl -sS -o /dev/null -w 'https://crewpay.uz → %{http_code}\n' --max-time 10 https://crewpay.uz/api/health || echo "https://crewpay.uz недоступен"
                 ;;
               logs)
-                cd /opt/crewpay && docker compose logs --no-color --tail 200 web
+                cd /opt/crewpay && docker compose logs --no-color --tail 150 web && echo "== резервные копии" && docker compose logs --no-color --tail 5 backup && ls -lh backups | tail -5
                 ;;
               restart)
                 echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null
-                cd /opt/crewpay && docker compose pull web && docker compose up -d web && sleep 5 && docker compose ps
+                cd /opt/crewpay && docker compose pull && docker compose up -d --remove-orphans && sleep 8 && docker compose ps
                 ;;
             esac
