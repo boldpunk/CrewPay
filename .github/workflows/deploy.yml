@@ -101,6 +101,17 @@ jobs:
           fi
           if [ -n "$missing" ]; then echo "::error::Не заданы секреты:$missing"; exit 1; fi
 
+      - name: Prepare /opt/crewpay
+        if: env.SSH_HOST != ''
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -eu
+            [ -w /opt/crewpay ] || { sudo mkdir -p /opt/crewpay && sudo chown "$(id -un)":"$(id -gn)" /opt/crewpay; }
+
       - name: Copy docker-compose.yml to server
         if: env.SSH_HOST != ''
         uses: appleboy/scp-action@v0.1.7
