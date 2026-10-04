@@ -10,9 +10,6 @@ on:
         type: choice
         options: [status, setup, logs, restart]
         default: status
-      email:
-        description: Email для Let's Encrypt (только для setup)
-        required: false
 
 concurrency:
   group: server
@@ -33,11 +30,11 @@ jobs:
             echo "::error::Добавьте секреты SSH_HOST, SSH_USER, SSH_PRIVATE_KEY (Settings → Secrets and variables → Actions)"
             exit 1
           fi
-          if [ "${{ inputs.action }}" = setup ] && [ -z "${{ inputs.email }}" ]; then
-            echo "::error::Для setup укажите email"
+          # Email берём из секрета: значения input видны в публичных логах.
+          if [ "${{ inputs.action }}" = setup ] && [ -z "${{ secrets.ADMIN_EMAIL }}" ]; then
+            echo "::error::Для setup добавьте секрет ADMIN_EMAIL (email для Let's Encrypt)"
             exit 1
           fi
-          [ -n "${{ inputs.email }}" ] && echo "::add-mask::${{ inputs.email }}" || true
 
       - name: ${{ inputs.action }}
         uses: appleboy/ssh-action@v1.2.0
@@ -51,7 +48,7 @@ jobs:
             case "${{ inputs.action }}" in
               setup)
                 curl -fsSL https://raw.githubusercontent.com/boldpunk/CrewPay/${{ github.sha }}/deploy/setup-oracle.sh -o /tmp/crewpay-setup.sh
-                CREWPAY_CI=1 bash /tmp/crewpay-setup.sh "${{ inputs.email }}"
+                CREWPAY_CI=1 bash /tmp/crewpay-setup.sh "${{ secrets.ADMIN_EMAIL }}"
                 ;;
               status)
                 echo "== система";  . /etc/os-release; echo "$PRETTY_NAME $(uname -m)"; uptime
