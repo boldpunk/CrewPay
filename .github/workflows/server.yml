@@ -61,7 +61,10 @@ jobs:
                 command -v nginx >/dev/null && (sudo nginx -t 2>&1 | tail -1) || echo "nginx на хосте нет"
                 [ -f /opt/crewpay/edge.env ] && grep EDGE_NETWORK /opt/crewpay/edge.env || true
                 echo "== сертификат"; echo | openssl s_client -connect crewpay.uz:443 -servername crewpay.uz 2>/dev/null | openssl x509 -noout -subject -enddate 2>/dev/null || echo "HTTPS для crewpay.uz пока нет"
-                echo "== снаружи"; curl -sS -o /dev/null -w 'https://crewpay.uz → %{http_code}\n' --max-time 10 https://crewpay.uz/api/health || echo "https://crewpay.uz недоступен"
+                echo "== снаружи"
+                for site in crewpay.uz www.crewpay.uz boldpunk.uz fyndue.uz; do
+                  curl -sS -o /dev/null -w "https://$site → %{http_code}\n" --max-time 10 "https://$site/" || echo "https://$site недоступен"
+                done
                 ;;
               logs)
                 cd /opt/crewpay && docker compose logs --no-color --tail 150 web && echo "== резервные копии" && docker compose logs --no-color --tail 5 backup && ls -lh backups | tail -5
