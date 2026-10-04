@@ -8,7 +8,7 @@ on:
       action:
         description: Что сделать
         type: choice
-        options: [status, setup, logs, restart, caddy]
+        options: [status, setup, logs, restart, caddy, caddy-restart]
         default: status
 
 concurrency:
@@ -77,6 +77,10 @@ jobs:
                 echo "live config hosts: $(docker exec dcau-hub-caddy-1 wget -qO- http://localhost:2019/config/apps/http/servers 2>/dev/null | grep -o '"host":\[[^]]*\]' | tr '\n' ' ')"
                 echo "network dcau-hub_default: $(docker network inspect dcau-hub_default --format '{{range .Containers}}{{.Name}} {{end}}')"
                 echo "fyndue containers: $(docker ps --filter name=fyndue --format '{{.Names}}={{.Status}}' | tr '\n' ' ')"
+                ;;
+              caddy-restart)
+                curl -fsSL https://raw.githubusercontent.com/boldpunk/CrewPay/${{ github.sha }}/deploy/caddy-restart.sh -o /tmp/crewpay-caddy-restart.sh
+                bash /tmp/crewpay-caddy-restart.sh
                 ;;
               logs)
                 cd /opt/crewpay && docker compose logs --no-color --tail 150 web && echo "== резервные копии" && docker compose logs --no-color --tail 5 backup && ls -lh backups | tail -5
