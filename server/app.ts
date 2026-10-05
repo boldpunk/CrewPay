@@ -27,7 +27,7 @@ import { grantPro } from './subscription';
 import type { DB } from './db';
 import { extractItems } from './pdftext';
 import { renderReport } from './report';
-import { months, orders, payslips, profiles, proRequests, users } from './schema';
+import { months, orders, payslips, profiles, proRequests, sessions, users } from './schema';
 
 export interface AppOptions {
   db: DB;
@@ -43,7 +43,19 @@ export interface AppOptions {
   registerLimit?: number;
   /** Онлайн-оплата Pro. */
   payments?: PaymentsConfig;
+  /** Реквизиты и контакты для страницы «Условия и контакты». */
+  legal?: LegalInfo;
 }
+
+export interface LegalInfo {
+  operator?: string;
+  inn?: string;
+  email?: string;
+  telegram?: string;
+  phone?: string;
+}
+
+export type Access = 'pending' | 'active' | 'blocked';
 
 export interface PlanOptions {
   /** Пробный Pro при регистрации, дней (0 — без пробного периода). */
@@ -175,6 +187,18 @@ export function createApp(opts: AppOptions) {
     return u;
   };
 
+  /** Доступ к приложению решает администратор; сам администратор — всегда с доступом. */
+  const accessOf = (u: Pick<User, 'email' | 'status'>): Access =>
+    admins.has(u.email) ? 'active' : u.status === 'active' || u.status === 'blocked' ? u.status : 'pending';
+
+  const requireActive = (c: Context<Env>) => {
+    const u = requireUser(c);
+    const a = accessOf(u);
+    if (a !== 'active')
+      throw new HttpError(403, a === 'blocked' ? 'Доступ закрыт администратором' : 'Доступ ещё не открыт — дождитесь подтверждения администратора', 'access');
+    return u;
+  };
+
   const planOf = (u: Pick<User, 'email' | 'proUntil' | 'proSource'>) => {
     const admin = admins.has(u.email);
     const until = u.proUntil ? new Date(u.proUntil) : null;
@@ -187,7 +211,7 @@ export function createApp(opts: AppOptions) {
   };
 
   const requirePro = (c: Context<Env>) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     if (!planOf(u).pro) throw new HttpError(402, 'Доступно в CrewPay Pro', 'pro');
     return u;
   };
@@ -235,7 +259,12 @@ export function createApp(opts: AppOptions) {
 
   app.post('/api/auth/register', bodyLimit({ maxSize: 16 * 1024 }), async (c) => {
     const body = credentials
-      .extend({ name: z.string().max(120).optional(), captcha: captchaSchema.optional(), website: z.string().max(200).optional() })
+      .extend({
+        name: z.string().max(120).optional(),
+        captcha: captchaSchema.optional(),
+        website: z.string().max(200).optional(),
+        accept: z.boolean().optional(),
+      })
       .parse(await c.req.json());
     // Скрытое поле: человек его не видит, бот заполняет.
     if (body.website) throw new HttpError(400, 'Запрос отклонён');
@@ -250,6 +279,7 @@ export function createApp(opts: AppOptions) {
             : 'Проверка «не робот» не пройдена — обновите страницу',
         'captcha',
       );
+    if (body.accept !== true) throw new HttpError(400, 'Примите условия использования и согласие на обработку данных', 'terms');
     if (!registerLimiter.take(ip(c))) throw new HttpError(429, 'Слишком много регистраций, попробуйте позже');
     const email = normalizeEmail(body.email);
     if (!validEmail(email)) throw new HttpError(400, 'Проверьте email');
@@ -263,14 +293,15 @@ export function createApp(opts: AppOptions) {
         email,
         passwordHash: await hashPassword(body.password),
         name: (body.name ?? '').trim(),
-        proUntil: trialDays > 0 ? new Date(Date.now() + trialDays * 864e5) : null,
-        proSource: trialDays > 0 ? 'trial' : null,
+        // Доступ открывает администратор; пробный Pro начинается с этого момента.
+        status: admins.has(email) ? 'active' : 'pending',
+        termsAcceptedAt: new Date(),
       })
-      .returning({ id: users.id, email: users.email, name: users.name, proUntil: users.proUntil, proSource: users.proSource });
+      .returning({ id: users.id, email: users.email, name: users.name, proUntil: users.proUntil, proSource: users.proSource, status: users.status });
     await db.insert(profiles).values({ userId: u.id, data: { name: u.name } });
     const s = await createSession(db, u.id);
     setSession(c, s.token);
-    return c.json({ user: { id: u.id, email: u.email, name: u.name }, plan: planOf(u) }, 201);
+    return c.json({ user: { id: u.id, email: u.email, name: u.name }, plan: planOf(u), access: accessOf(u) }, 201);
   });
 
   app.post('/api/auth/login', bodyLimit({ maxSize: 16 * 1024 }), async (c) => {
@@ -285,7 +316,7 @@ export function createApp(opts: AppOptions) {
     loginLimiter.reset(key);
     const s = await createSession(db, u.id);
     setSession(c, s.token);
-    return c.json({ user: { id: u.id, email: u.email, name: u.name }, plan: planOf(u) });
+    return c.json({ user: { id: u.id, email: u.email, name: u.name }, plan: planOf(u), access: accessOf(u) });
   });
 
   app.post('/api/auth/logout', async (c) => {
@@ -301,8 +332,16 @@ export function createApp(opts: AppOptions) {
       user: { id: u.id, email: u.email, name: u.name, createdAt: u.createdAt },
       profile: p?.data ?? {},
       plan: planOf(u),
+      access: accessOf(u),
       request: await openRequest(u.id),
     });
+  });
+
+  // Ставки и коэффициенты — только тем, кому администратор открыл доступ.
+  app.get('/api/regulation', async (c) => {
+    requireActive(c);
+    c.header('cache-control', 'private, no-store');
+    return c.json(await opts.regulation());
   });
 
   // ---------- подписка ----------
@@ -313,6 +352,7 @@ export function createApp(opts: AppOptions) {
       trialDays,
       terms: PRO_TERMS,
       contactUrl: opts.plan?.contactUrl ?? '',
+      legal: opts.legal ?? {},
       providers: opts.plan?.price ? enabledProviders(payments) : [],
     }),
   );
@@ -320,7 +360,7 @@ export function createApp(opts: AppOptions) {
   // ---------- онлайн-оплата ----------
 
   app.post('/api/pay/checkout', bodyLimit({ maxSize: 4 * 1024 }), async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     if (!checkoutLimiter.take(u.id)) throw new HttpError(429, 'Слишком много попыток оплаты, попробуйте позже');
     const body = z
       .object({
@@ -351,7 +391,7 @@ export function createApp(opts: AppOptions) {
   });
 
   app.post('/api/subscription/request', bodyLimit({ maxSize: 8 * 1024 }), async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     if (!requestLimiter.take(u.id)) throw new HttpError(429, 'Слишком много заявок, попробуйте позже');
     const body = z
       .object({ months: z.number().int().refine((m) => (PRO_TERMS as readonly number[]).includes(m)), note: z.string().max(300).default('') })
@@ -382,13 +422,23 @@ export function createApp(opts: AppOptions) {
       .orderBy(desc(proRequests.createdAt))
       .limit(100);
     const like = `%${q.replace(/[\\%_]/g, (m) => '\\' + m)}%`;
+    const cols = {
+      email: users.email,
+      name: users.name,
+      proUntil: users.proUntil,
+      proSource: users.proSource,
+      status: users.status,
+      createdAt: users.createdAt,
+    };
     const list = await db
-      .select({ email: users.email, name: users.name, proUntil: users.proUntil, proSource: users.proSource, createdAt: users.createdAt })
+      .select(cols)
       .from(users)
       .where(q ? or(ilike(users.email, like), ilike(users.name, like)) : undefined)
       .orderBy(desc(users.createdAt))
       .limit(50);
-    return c.json({ requests, users: list.map((x) => ({ ...x, plan: planOf(x) })) });
+    const pending = await db.select(cols).from(users).where(eq(users.status, 'pending')).orderBy(desc(users.createdAt)).limit(100);
+    const view = (x: (typeof list)[number]) => ({ ...x, plan: planOf(x), access: accessOf(x) });
+    return c.json({ requests, pending: pending.filter((x) => accessOf(x) === 'pending').map(view), users: list.map(view) });
   });
 
   app.post('/api/admin/grant', bodyLimit({ maxSize: 8 * 1024 }), async (c) => {
@@ -401,6 +451,32 @@ export function createApp(opts: AppOptions) {
     return c.json({ email: u.email, plan: planOf({ email: u.email, proUntil: until, proSource: until ? 'paid' : null }) });
   });
 
+  // Открыть или закрыть доступ. При первом открытии начинается пробный Pro (если он включён).
+  app.post('/api/admin/access', bodyLimit({ maxSize: 4 * 1024 }), async (c) => {
+    const admin = requireAdmin(c);
+    const body = z.object({ email: z.string().max(254), status: z.enum(['active', 'blocked', 'pending']) }).parse(await c.req.json());
+    const email = normalizeEmail(body.email);
+    if (admins.has(email)) throw new HttpError(400, 'Доступ администратора не меняется');
+    const [u] = await db
+      .select({ id: users.id, email: users.email, status: users.status, proUntil: users.proUntil, proSource: users.proSource })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+    if (!u) throw new HttpError(404, 'Пользователь с таким email не найден');
+    const firstOpen = body.status === 'active' && u.status === 'pending' && !u.proUntil && !u.proSource;
+    const set: Partial<typeof users.$inferInsert> = { status: body.status };
+    if (firstOpen && trialDays > 0) {
+      set.proUntil = new Date(Date.now() + trialDays * 864e5);
+      set.proSource = 'trial';
+    }
+    await db.update(users).set(set).where(eq(users.id, u.id));
+    // Закрыли доступ — выходим из всех сессий пользователя.
+    if (body.status !== 'active') await db.delete(sessions).where(eq(sessions.userId, u.id));
+    console.log(`access: ${admin.email} → ${email}: ${body.status}`);
+    const next = { ...u, ...set };
+    return c.json({ email: u.email, access: accessOf(next as typeof u), plan: planOf(next as typeof u) });
+  });
+
   app.post('/api/admin/requests/:id/reject', async (c) => {
     requireAdmin(c);
     const id = z.string().uuid().parse(c.req.param('id'));
@@ -409,7 +485,7 @@ export function createApp(opts: AppOptions) {
   });
 
   app.put('/api/profile', bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     const data = profileSchema.parse(await c.req.json());
     await db
       .insert(profiles)
@@ -422,7 +498,7 @@ export function createApp(opts: AppOptions) {
   // ---------- месяцы ----------
 
   app.get('/api/months', async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     const rows = await db
       .select({ month: months.month, state: months.state, totals: months.totals, payslipId: months.payslipId, updatedAt: months.updatedAt })
       .from(months)
@@ -432,7 +508,7 @@ export function createApp(opts: AppOptions) {
   });
 
   app.put('/api/months/:month', bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     const month = monthKey.parse(c.req.param('month'));
     const body = z.object({ state: stateSchema, payslipId: z.string().uuid().nullable().optional() }).parse(await c.req.json());
     const reg = await opts.regulation();
@@ -453,7 +529,7 @@ export function createApp(opts: AppOptions) {
   });
 
   app.delete('/api/months/:month', async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     const month = monthKey.parse(c.req.param('month'));
     await db.delete(months).where(and(eq(months.userId, u.id), eq(months.month, month)));
     return c.json({ ok: true });
@@ -489,7 +565,7 @@ export function createApp(opts: AppOptions) {
   });
 
   app.get('/api/payslips', async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     const rows = await db
       .select({ id: payslips.id, month: payslips.month, filename: payslips.filename, parsed: payslips.parsed, createdAt: payslips.createdAt })
       .from(payslips)
@@ -499,7 +575,7 @@ export function createApp(opts: AppOptions) {
   });
 
   app.get('/api/payslips/:id/file', async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     const id = z.string().uuid().parse(c.req.param('id'));
     const [row] = await db.select().from(payslips).where(and(eq(payslips.id, id), eq(payslips.userId, u.id))).limit(1);
     if (!row) throw new HttpError(404, 'Листок не найден');
@@ -513,7 +589,7 @@ export function createApp(opts: AppOptions) {
   });
 
   app.delete('/api/payslips/:id', async (c) => {
-    const u = requireUser(c);
+    const u = requireActive(c);
     const id = z.string().uuid().parse(c.req.param('id'));
     await db.update(months).set({ payslipId: null }).where(and(eq(months.userId, u.id), eq(months.payslipId, id)));
     await db.delete(payslips).where(and(eq(payslips.id, id), eq(payslips.userId, u.id)));

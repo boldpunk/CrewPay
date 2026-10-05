@@ -14,6 +14,10 @@ export const users = pgTable('users', {
   proUntil: timestamp('pro_until', { withTimezone: true }),
   /** trial — пробный период при регистрации, paid — выдано администратором после оплаты. */
   proSource: text('pro_source'),
+  /** pending — ждёт решения администратора, active — доступ открыт, blocked — закрыт. */
+  status: text('status').notNull().default('pending'),
+  /** Когда пользователь принял условия и дал согласие на обработку данных. */
+  termsAcceptedAt: timestamp('terms_accepted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -205,6 +209,10 @@ create table if not exists payslips (
 create index if not exists payslips_user_month_idx on payslips(user_id, month);
 alter table users add column if not exists pro_until timestamptz;
 alter table users add column if not exists pro_source text;
+-- Уже зарегистрированные до появления одобрения сохраняют доступ; новые ждут администратора.
+alter table users add column if not exists status text not null default 'active';
+alter table users alter column status set default 'pending';
+alter table users add column if not exists terms_accepted_at timestamptz;
 create table if not exists pro_requests (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,

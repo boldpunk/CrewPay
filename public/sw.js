@@ -1,5 +1,5 @@
 // Офлайн-режим: сеть в приоритете (свежие ставки и релизы), кэш — запасной вариант.
-const CACHE = 'crewpay-v1';
+const CACHE = 'crewpay-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => {
@@ -13,7 +13,10 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+  // Ответы API (аккаунт, ставки, листки) не кладём в кэш устройства.
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/payments/')) return;
   e.respondWith(
     fetch(req)
       .then((res) => {

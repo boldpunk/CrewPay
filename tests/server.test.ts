@@ -1,6 +1,6 @@
 // Интеграционные тесты API на настоящем Postgres. Нужна переменная TEST_DATABASE_URL.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import regJson from '../public/regulation.json';
+import regJson from '../data/regulation.json';
 import { createApp } from '../server/app';
 import { Pow, solve } from '../server/captcha';
 import { createHash } from 'node:crypto';
@@ -98,9 +98,17 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
   };
 
   /** Регистрация как в браузере: задача → перебор → отправка. */
-  const register = async (json: Record<string, unknown>) => {
+  /** Регистрация как в браузере: задача → перебор → отправка. По умолчанию сразу открываем доступ (как администратор). */
+  const register = async (json: Record<string, unknown>, opts: { pending?: boolean } = {}) => {
     const ch = await (await call('/api/auth/challenge')).json();
-    return call('/api/auth/register', { method: 'POST', json: { ...json, captcha: solve(ch) } });
+    const r = await call('/api/auth/register', { method: 'POST', json: { accept: true, ...json, captcha: solve(ch) } });
+    if (r.status === 201 && !opts.pending)
+      await pool.query(
+        `update users set status = 'active', pro_until = coalesce(pro_until, now() + interval '7 days'), pro_source = coalesce(pro_source, 'trial')
+         where email = $1`,
+        [String(json.email).trim().toLowerCase()],
+      );
+    return r;
   };
 
   const state = {
@@ -274,24 +282,24 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     const sol = solve(ch);
     const wrong = await call('/api/auth/register', {
       method: 'POST',
-      json: { email: 'bot2@example.com', password: 'password1', captcha: { ...sol, number: (sol.number + 1) % 2001 } },
+      json: { email: 'bot2@example.com', password: 'password1', accept: true, captcha: { ...sol, number: (sol.number + 1) % 2001 } },
     });
     expect(wrong.status).toBe(400);
     const forged = await call('/api/auth/register', {
       method: 'POST',
-      json: { email: 'bot2@example.com', password: 'password1', captcha: { ...sol, salt: sol.salt.replace(/\.\d+$/, '.0') } },
+      json: { email: 'bot2@example.com', password: 'password1', accept: true, captcha: { ...sol, salt: sol.salt.replace(/\.\d+$/, '.0') } },
     });
     expect(forged.status).toBe(400);
 
     const honeypot = await call('/api/auth/register', {
       method: 'POST',
-      json: { email: 'bot3@example.com', password: 'password1', captcha: sol, website: 'http://spam' },
+      json: { email: 'bot3@example.com', password: 'password1', accept: true, captcha: sol, website: 'http://spam' },
     });
     expect(honeypot.status).toBe(400);
 
-    const first = await call('/api/auth/register', { method: 'POST', json: { email: 'human@example.com', password: 'password1', captcha: sol } });
+    const first = await call('/api/auth/register', { method: 'POST', json: { email: 'human@example.com', password: 'password1', accept: true, captcha: sol } });
     expect(first.status).toBe(201);
-    const replay = await call('/api/auth/register', { method: 'POST', json: { email: 'human2@example.com', password: 'password1', captcha: sol } });
+    const replay = await call('/api/auth/register', { method: 'POST', json: { email: 'human2@example.com', password: 'password1', accept: true, captcha: sol } });
     expect(replay.status).toBe(400);
 
     // Слишком быстрая отправка формы.
@@ -302,10 +310,39 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
   });
 
   it('подписка: пробный период, блокировка Pro-функций, заявка и выдача администратором', async () => {
+    // Администратор открывает доступ сразу при регистрации.
     cookie = '';
-    const r = await register({ email: 'pilot@example.com', password: 'password1' });
-    expect((await r.json()).plan).toMatchObject({ pro: true, source: 'trial', admin: false });
+    const a = await register({ email: 'admin@example.com', password: 'password1' }, { pending: true });
+    expect(await a.json()).toMatchObject({ access: 'active', plan: { pro: true, admin: true } });
+    const adminCookie = a.headers.get('set-cookie')!.split(';')[0];
+
+    // Новый пользователь ждёт решения администратора: ни ставок, ни расчётов.
+    cookie = '';
+    const r = await register({ email: 'pilot@example.com', password: 'password1' }, { pending: true });
+    expect(await r.json()).toMatchObject({ access: 'pending', plan: { pro: false } });
     cookie = r.headers.get('set-cookie')!.split(';')[0];
+    const pilotCookie = cookie;
+    const denied = await call('/api/regulation');
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).code).toBe('access');
+    expect((await call('/api/months/2026-08', { method: 'PUT', json: { state } })).status).toBe(403);
+    expect((await call('/api/months')).status).toBe(403);
+    expect((await call('/api/admin/access', { method: 'POST', json: { email: 'pilot@example.com', status: 'active' } })).status).toBe(403);
+
+    cookie = adminCookie;
+    const pend = await (await call('/api/admin/subscriptions')).json();
+    // human@example.com из теста защиты от ботов тоже ждёт — он регистрировался напрямую.
+    expect(pend.pending.map((x: { email: string }) => x.email)).toContain('pilot@example.com');
+    const opened = await (await call('/api/admin/access', { method: 'POST', json: { email: 'pilot@example.com', status: 'active' } })).json();
+    expect(opened).toMatchObject({ access: 'active', plan: { pro: true, source: 'trial' } });
+    expect((await (await call('/api/admin/subscriptions')).json()).pending.map((x: { email: string }) => x.email)).not.toContain('pilot@example.com');
+
+    cookie = pilotCookie;
+    expect((await (await call('/api/me')).json())).toMatchObject({ access: 'active', plan: { pro: true, source: 'trial' } });
+    const regRes = await call('/api/regulation');
+    expect(regRes.status).toBe(200);
+    expect(regRes.headers.get('cache-control')).toContain('no-store');
+    expect((await regRes.json()).pilot).toBeTruthy();
 
     // Пробный период закончился.
     await pool.query(`update users set pro_until = now() - interval '1 day' where email = 'pilot@example.com'`);
@@ -326,12 +363,8 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     expect((await (await call('/api/me')).json()).request.months).toBe(3);
     expect((await call('/api/admin/subscriptions')).status).toBe(403);
     expect((await call('/api/admin/grant', { method: 'POST', json: { email: 'pilot@example.com', months: 12 } })).status).toBe(403);
-    const pilotCookie = cookie;
 
-    cookie = '';
-    const a = await register({ email: 'admin@example.com', password: 'password1' });
-    expect((await a.json()).plan).toMatchObject({ pro: true, admin: true });
-    cookie = a.headers.get('set-cookie')!.split(';')[0];
+    cookie = adminCookie;
     const list = await (await call('/api/admin/subscriptions')).json();
     expect(list.requests).toHaveLength(1);
     expect(list.requests[0]).toMatchObject({ email: 'pilot@example.com', months: 3, note: 'Telegram @pilot' });
@@ -350,7 +383,7 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     expect(until).toBeGreaterThan(Date.now() + 85 * 864e5);
     expect((await call('/api/report', { method: 'POST', json: { month: '2026-08', state } })).status).toBe(200);
 
-    cookie = a.headers.get('set-cookie')!.split(';')[0];
+    cookie = adminCookie;
     await call('/api/admin/grant', { method: 'POST', json: { email: 'pilot@example.com', months: 0 } });
     cookie = pilotCookie;
     expect((await (await call('/api/me')).json()).plan.pro).toBe(false);
@@ -502,5 +535,29 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     cookie = r.headers.get('set-cookie')!.split(';')[0];
     expect((await call(`/api/pay/orders/${co.orderId}`)).status).toBe(404);
     cookie = other;
+  });
+  it('регистрация требует согласия с условиями; закрытие доступа завершает сессии', async () => {
+    cookie = '';
+    const ch = await (await call('/api/auth/challenge')).json();
+    const no = await call('/api/auth/register', { method: 'POST', json: { email: 'noterms@example.com', password: 'password1', captcha: solve(ch) } });
+    expect(no.status).toBe(400);
+    expect((await no.json()).code).toBe('terms');
+
+    const r = await register({ email: 'blockme@example.com', password: 'password1' });
+    const userCookie = r.headers.get('set-cookie')!.split(';')[0];
+    const [{ terms_accepted_at }] = (await pool.query(`select terms_accepted_at from users where email = 'blockme@example.com'`)).rows;
+    expect(terms_accepted_at).toBeTruthy();
+
+    const login = await call('/api/auth/login', { method: 'POST', json: { email: 'admin@example.com', password: 'password1' } });
+    cookie = login.headers.get('set-cookie')!.split(';')[0];
+    expect((await call('/api/admin/access', { method: 'POST', json: { email: 'admin@example.com', status: 'blocked' } })).status).toBe(400);
+    expect((await (await call('/api/admin/access', { method: 'POST', json: { email: 'blockme@example.com', status: 'blocked' } })).json()).access).toBe('blocked');
+
+    cookie = userCookie;
+    expect((await call('/api/me')).status).toBe(401);
+    const again = await call('/api/auth/login', { method: 'POST', json: { email: 'blockme@example.com', password: 'password1' } });
+    expect((await again.json()).access).toBe('blocked');
+    cookie = again.headers.get('set-cookie')!.split(';')[0];
+    expect((await (await call('/api/regulation')).json()).error).toContain('закрыт');
   });
 });

@@ -1,5 +1,4 @@
 import './style.css';
-import bundledRegulation from '../public/regulation.json';
 import { availableAircraft, calculateMonth, findPosition, positionsFor, statusesFor } from './calc/engine';
 import { coef, hours as fmtHours, money, num, parseHours, parseMoney } from './calc/format';
 import { formatDate, paymentSchedule, workingDays } from './calc/paydates';
@@ -42,7 +41,9 @@ import {
 import { icon, logoMark } from './ui/icons';
 import { type PowChallenge, type PowSolution, solvePow } from './pow';
 
-type View = 'calc' | 'flights' | 'history' | 'reference' | 'profile' | 'settings' | 'pro';
+type View = 'calc' | 'flights' | 'history' | 'reference' | 'profile' | 'settings' | 'pro' | 'legal';
+/** guest — не вошёл; pending — ждёт администратора; blocked — доступ закрыт; offline — нет связи и нет сохранённого доступа. */
+type Access = 'guest' | 'pending' | 'blocked' | 'active' | 'offline';
 
 /** Сборка для предпросмотра во встроенном окне (claude.ai): там нет печати, скачивания файлов и service worker. */
 const IS_EMBED = import.meta.env.VITE_TARGET === 'embed';
@@ -51,7 +52,9 @@ const CAN_DOWNLOAD = !IS_EMBED;
 
 const CREDIT_URL = 'https://boldstudio.uz';
 
-let reg: Regulation = bundledRegulation as Regulation;
+// Ставки приходят с сервера только после того, как администратор открыл доступ.
+let reg!: Regulation;
+let access: Access = 'guest';
 let state: AppState;
 let history: HistoryEntry[] = [];
 let profile: Profile | null = null;
@@ -146,8 +149,19 @@ function initials(name: string): string {
 
 function applyTheme() {
   const root = document.documentElement;
-  if (state.theme === 'system') root.removeAttribute('data-theme');
-  else root.setAttribute('data-theme', state.theme);
+  // До открытия доступа состояния расчёта ещё нет — тему берём из сохранённого.
+  const theme = (state as AppState | undefined)?.theme ?? savedTheme();
+  if (theme === 'system') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', theme);
+}
+
+function savedTheme(): AppState['theme'] {
+  try {
+    const t = (JSON.parse(localStorage.getItem('crewpay.state.v1') ?? 'null') as { theme?: string } | null)?.theme;
+    return t === 'light' || t === 'dark' ? t : 'system';
+  } catch {
+    return 'system';
+  }
 }
 
 function isValidRegulation(x: unknown): x is Regulation {
@@ -155,21 +169,58 @@ function isValidRegulation(x: unknown): x is Regulation {
   return !!r && Array.isArray(r.aircraft) && !!r.pilot && !!r.cabin && !!r.constants && !!r.regulation;
 }
 
-/** Справочник грузится с сервера, чтобы администратор мог менять ставки без релиза. */
-async function loadRegulation(): Promise<Regulation> {
+const REG_KEY = 'crewpay.reg';
+const ACCESS_KEY = 'crewpay.access';
+
+/** Ставки — только для пользователей с открытым доступом; копия на устройстве — для работы офлайн. */
+async function fetchRegulation(): Promise<Regulation | null> {
   try {
-    const res = await fetch(`${import.meta.env.BASE_URL}regulation.json`, { cache: 'no-cache' });
-    if (!res.ok) throw new Error(String(res.status));
-    const data: unknown = await res.json();
+    const data: unknown = await api.regulation();
     if (isValidRegulation(data)) {
-      // Новые константы могли не попасть в старый файл на сервере — дополняем из встроенной копии.
-      const bundled = bundledRegulation as Regulation;
-      return { ...data, constants: { ...bundled.constants, ...data.constants } };
+      try {
+        localStorage.setItem(REG_KEY, JSON.stringify(data));
+      } catch {
+        /* хранилище недоступно */
+      }
+      return data;
     }
   } catch {
-    /* офлайн или файл недоступен — используем встроенную копию */
+    /* сеть — берём копию */
   }
-  return bundledRegulation as Regulation;
+  return cachedRegulation();
+}
+
+function cachedRegulation(): Regulation | null {
+  try {
+    const data: unknown = JSON.parse(localStorage.getItem(REG_KEY) ?? 'null');
+    return isValidRegulation(data) ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Выход или закрытый доступ: на устройстве не остаётся ни ставок, ни отметки о доступе. */
+function forgetAccess() {
+  try {
+    localStorage.removeItem(REG_KEY);
+    localStorage.removeItem(ACCESS_KEY);
+  } catch {
+    /* хранилище недоступно */
+  }
+}
+
+function rememberAccess() {
+  try {
+    localStorage.setItem(ACCESS_KEY, access);
+  } catch {
+    /* хранилище недоступно */
+  }
+}
+
+/** Первичная загрузка данных приложения — когда ставки уже есть. */
+function initData(r: Regulation) {
+  reg = r;
+  state = loadState(reg);
 }
 
 function positionSalary(pos: ResolvedPosition): number | null {
@@ -273,6 +324,8 @@ const MOBILE_TABS = TABS.filter(([id]) => id !== 'settings');
 
 function renderShell() {
   const ini = profile?.name ? initials(profile.name) : '';
+  const open = access === 'active';
+  app.classList.toggle('gated', !open);
   app.innerHTML = `
     <header class="topbar">
       <div class="topbar-inner">
@@ -280,7 +333,7 @@ function renderShell() {
           ${logoMark(34)}
           <span class="wordmark">Crew<span>Pay</span></span>
         </button>
-        <nav class="nav-desktop" aria-label="Разделы">
+        ${open ? `<nav class="nav-desktop" aria-label="Разделы">
           ${TABS.filter(([id]) => id !== 'profile')
             .map(
               ([id, label, ic]) =>
@@ -290,7 +343,7 @@ function renderShell() {
         </nav>
         <button class="avatar${view === 'profile' ? ' active' : ''}" data-view="profile" aria-label="Профиль">
           ${ini ? `<span>${esc(ini)}</span>` : icon('user')}
-        </button>
+        </button>` : ''}
       </div>
     </header>
     <main id="view"></main>
@@ -299,6 +352,7 @@ function renderShell() {
         <div class="footer-brand">
           ${logoMark(22)}
           <span>© ${new Date().getFullYear()} CrewPay</span>
+          <button class="footer-link" data-view="legal">Условия и контакты</button>
         </div>
         <a class="credit" href="${CREDIT_URL}" target="_blank" rel="noopener">
           <span>Дизайн и разработка —</span>
@@ -308,12 +362,12 @@ function renderShell() {
         </a>
       </div>
     </footer>
-    <nav class="tabbar" aria-label="Разделы">
+    ${open ? `<nav class="tabbar" aria-label="Разделы">
       ${MOBILE_TABS.map(
         ([id, label, ic]) =>
           `<button class="tab${view === id || (id === 'profile' && (view === 'settings' || view === 'pro')) ? ' active' : ''}" data-view="${id}" ${view === id ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></button>`,
       ).join('')}
-    </nav>
+    </nav>` : ''}
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   `;
   app.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) =>
@@ -324,12 +378,22 @@ function renderShell() {
 
 function go(v: View) {
   view = v;
+  syncPath();
   renderShell();
   window.scrollTo({ top: 0 });
 }
 
+/** У страницы условий свой адрес — его можно дать платёжной системе: crewpay.uz/legal. */
+function syncPath() {
+  if (IS_EMBED) return;
+  const path = view === 'legal' ? '/legal' : '/';
+  if (location.pathname !== path) window.history.replaceState(null, '', path);
+}
+
 function renderView() {
   const root = $('#view')!;
+  if (view === 'legal') return renderLegal(root);
+  if (access !== 'active') return renderGate(root);
   if (view === 'calc') renderCalc(root);
   else if (view === 'flights') renderFlights(root);
   else if (view === 'reference') renderReference(root);
@@ -1362,6 +1426,9 @@ function renderResult() {
         : ''
     }
 
+    <p class="disclaimer">${icon('info')}<span>Справочный расчёт по введённым данным — не официальный документ. Размер оплаты определяет работодатель.
+      <button class="link" data-view="legal">Условия</button></span></p>
+
     <div class="result-actions">
       <button class="btn primary" data-action="save-history" ${ok ? '' : 'disabled'}>${icon('save')}Сохранить ${esc(monthLabel(state.month, true))}</button>
       <button class="btn" data-action="copy" ${ok ? '' : 'disabled'}>${icon('copy')}Копировать</button>
@@ -2317,7 +2384,7 @@ function resetPow() {
 /** Сервер не принимает форму быстрее 3 секунд после выдачи задачи — человек так не успевает, менеджер паролей может. */
 const MIN_FORM_MS = 3300;
 
-async function registerWithPow(body: { email: string; password: string; name: string; website: string }, retry = true): Promise<void> {
+async function registerWithPow(body: { email: string; password: string; name: string; website: string; accept: boolean }, retry = true): Promise<void> {
   const job = startPow();
   const captcha = await job.promise;
   const wait = job.issuedAt + MIN_FORM_MS - Date.now();
@@ -2484,7 +2551,7 @@ function renderPro(root: HTMLElement) {
   const adminCard = plan?.admin
     ? `
       <div class="card" id="admin-card">
-        <div class="card-head">${icon('shield')}<h2>Подписки · администратор</h2></div>
+        <div class="card-head">${icon('shield')}<h2>Пользователи и доступ</h2></div>
         <form class="admin-grant" id="grant-form">
           <input name="email" type="email" required placeholder="email пользователя" aria-label="Email" />
           <select name="months" aria-label="Срок">
@@ -2578,11 +2645,43 @@ function bindAdmin(root: HTMLElement) {
       toast(ex instanceof ApiError ? ex.message : 'Сервер недоступен');
     }
   };
+  const setAccess = async (email: string, status: 'active' | 'blocked') => {
+    if (status === 'blocked' && !(await ask(`Закрыть доступ для ${email}? Пользователь выйдет на всех устройствах.`, 'Закрыть доступ', true))) return;
+    try {
+      const r = await api.adminAccess(email, status);
+      toast(
+        r.access === 'active'
+          ? `${r.email}: доступ открыт${r.plan.pro && r.plan.source === 'trial' ? ', пробный Pro включён' : ''}`
+          : `${r.email}: доступ закрыт`,
+      );
+      load();
+    } catch (ex) {
+      toast(ex instanceof ApiError ? ex.message : 'Сервер недоступен');
+    }
+  };
   const load = async () => {
     try {
-      const { requests, users } = await api.adminSubscriptions(adminQuery);
+      const { requests, pending, users } = await api.adminSubscriptions(adminQuery);
       body.innerHTML = `
-        <h3 class="admin-h">Заявки${requests.length ? ` · ${requests.length}` : ''}</h3>
+        <h3 class="admin-h">Ждут доступа${pending.length ? ` · ${pending.length}` : ''}</h3>
+        ${
+          pending.length
+            ? `<ul class="admin-list">${pending
+                .map(
+                  (u) => `
+              <li class="pending">
+                <div><b>${esc(u.email)}</b>${u.name ? ` · ${esc(u.name)}` : ''}<br />
+                  <span class="muted small">заявка от ${fmtDay(u.createdAt)}</span></div>
+                <div class="admin-actions">
+                  <button class="btn small primary" data-access="${esc(u.email)}" data-status="active">Открыть доступ</button>
+                  <button class="btn small ghost" data-access="${esc(u.email)}" data-status="blocked">Отклонить</button>
+                </div>
+              </li>`,
+                )
+                .join('')}</ul>`
+            : '<p class="muted small">Новых регистраций нет.</p>'
+        }
+        <h3 class="admin-h">Заявки на Pro${requests.length ? ` · ${requests.length}` : ''}</h3>
         ${
           requests.length
             ? `<ul class="admin-list">${requests
@@ -2610,15 +2709,31 @@ function bindAdmin(root: HTMLElement) {
               <span class="muted small">${
                 u.plan.admin
                   ? 'администратор'
-                  : u.plan.pro && u.plan.until
-                    ? `${u.plan.source === 'trial' ? 'пробный' : 'Pro'} до ${fmtDay(u.plan.until)}`
-                    : 'бесплатный'
+                  : u.access === 'pending'
+                    ? 'ждёт доступа'
+                    : u.access === 'blocked'
+                      ? 'доступ закрыт'
+                      : u.plan.pro && u.plan.until
+                        ? `${u.plan.source === 'trial' ? 'пробный Pro' : 'Pro'} до ${fmtDay(u.plan.until)}`
+                        : 'доступ открыт · без Pro'
               } · с ${fmtDay(u.createdAt)}</span></div>
+            ${
+              u.plan.admin
+                ? ''
+                : `<div class="admin-actions">${
+                    u.access === 'active'
+                      ? `<button class="btn small ghost danger" data-access="${esc(u.email)}" data-status="blocked">Закрыть доступ</button>`
+                      : `<button class="btn small" data-access="${esc(u.email)}" data-status="active">Открыть доступ</button>`
+                  }</div>`
+            }
           </li>`,
           )
           .join('')}</ul>`;
       body.querySelectorAll<HTMLButtonElement>('[data-grant]').forEach((b) =>
         b.addEventListener('click', () => grant(b.dataset.grant!, Number(b.dataset.months))),
+      );
+      body.querySelectorAll<HTMLButtonElement>('[data-access]').forEach((b) =>
+        b.addEventListener('click', () => setAccess(b.dataset.access!, b.dataset.status as 'active' | 'blocked')),
       );
       body.querySelectorAll<HTMLButtonElement>('[data-reject]').forEach((b) =>
         b.addEventListener('click', async () => {
@@ -2652,7 +2767,274 @@ function bindAdmin(root: HTMLElement) {
   load();
 }
 
+// ---------- доступ ----------
+
+/** Всё, кроме страницы условий, закрыто до решения администратора. */
+function renderGate(root: HTMLElement) {
+  let body: string;
+  if (access === 'pending')
+    body = `
+      <div class="card gate-card">
+        <div class="gate-icon">${icon('clock')}</div>
+        <h2>Заявка отправлена</h2>
+        <p class="muted">Вы зарегистрированы как <b>${esc(account?.email ?? '')}</b>. Администратор проверит заявку и откроет доступ — обычно в течение дня.</p>
+        <div class="row-actions">
+          <button class="btn primary" data-gate="refresh">${icon('refresh')}Проверить доступ</button>
+          <button class="btn ghost" data-gate="logout">${icon('logout')}Выйти</button>
+        </div>
+      </div>`;
+  else if (access === 'blocked')
+    body = `
+      <div class="card gate-card">
+        <div class="gate-icon danger">${icon('lock')}</div>
+        <h2>Доступ закрыт</h2>
+        <p class="muted">Администратор закрыл доступ для <b>${esc(account?.email ?? '')}</b>. Если это ошибка — напишите по контактам на странице условий.</p>
+        <div class="row-actions">
+          <button class="btn" data-view="legal">${icon('info')}Контакты</button>
+          <button class="btn ghost" data-gate="logout">${icon('logout')}Выйти</button>
+        </div>
+      </div>`;
+  else if (access === 'offline')
+    body = `
+      <div class="card gate-card">
+        <div class="gate-icon">${icon('alert')}</div>
+        <h2>Нет связи с сервером</h2>
+        <p class="muted">Проверьте интернет и попробуйте ещё раз. Без связи приложение работает, только если доступ уже был открыт на этом устройстве.</p>
+        <div class="row-actions"><button class="btn primary" data-gate="reload">${icon('refresh')}Повторить</button></div>
+      </div>`;
+  else body = authCardHtml();
+
+  root.innerHTML = `
+    <section class="page gate">
+      <div class="gate-hero">
+        ${logoMark(56)}
+        <h1>Расчёт налёта и&nbsp;оплаты для экипажа</h1>
+        <p class="muted">Закрытый сервис для личных справочных расчётов. Доступ открывает администратор после регистрации.</p>
+      </div>
+      ${body}
+      <p class="gate-legal small muted">Расчёты носят справочный характер и не являются официальным документом.
+        <button class="link" data-view="legal">Условия и контакты</button></p>
+    </section>`;
+
+  if (access === 'guest') bindAuth(root);
+  $('[data-gate=refresh]', root)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    await loadAccount();
+    if (access === 'active') toast('Доступ открыт');
+    else toast('Пока ждём решения администратора');
+    renderShell();
+  });
+  $('[data-gate=reload]', root)?.addEventListener('click', () => location.reload());
+  $('[data-gate=logout]', root)?.addEventListener('click', async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* всё равно выходим */
+    }
+    account = null;
+    plan = null;
+    proRequest = null;
+    access = 'guest';
+    authMode = 'login';
+    rememberPlan();
+    forgetAccess();
+    renderShell();
+  });
+}
+
+// ---------- условия и контакты ----------
+
+const LEGAL_DATE = '5 октября 2026 г.';
+
+function renderLegal(root: HTMLElement) {
+  const l = planInfo?.legal ?? {};
+  const price = planInfo?.price ? `${num(planInfo.price)} сум в месяц` : 'указана на странице «Подписка»';
+  const tg = (l.telegram ?? '').replace(/^@/, '');
+  const contacts = [
+    l.email ? `<li>${icon('info')}<span>Email: <a href="mailto:${esc(l.email)}">${esc(l.email)}</a></span></li>` : '',
+    tg ? `<li>${icon('arrowUpRight')}<span>Telegram: <a href="https://t.me/${esc(tg)}" target="_blank" rel="noopener">@${esc(tg)}</a></span></li>` : '',
+    l.phone ? `<li>${icon('user')}<span>Телефон: <a href="tel:${esc(l.phone.replace(/[^\d+]/g, ''))}">${esc(l.phone)}</a></span></li>` : '',
+    `<li>${icon('arrowUpRight')}<span>Сайт разработчика: <a href="${CREDIT_URL}" target="_blank" rel="noopener">boldstudio.uz</a></span></li>`,
+  ].join('');
+  const sec = (n: number, title: string, body: string) => `<section class="legal-sec"><h2><span>${n}</span>${title}</h2>${body}</section>`;
+
+  root.innerHTML = `
+    <article class="page legal">
+      <div class="page-head">
+        <h1>Условия использования и контакты</h1>
+        <p class="muted">Публичная оферта и политика обработки данных сервиса CrewPay (crewpay.uz). Редакция от ${LEGAL_DATE}</p>
+      </div>
+
+      <div class="card legal-key">
+        ${icon('shield')}
+        <p><b>Главное.</b> CrewPay — независимый вспомогательный калькулятор для личных справочных расчётов. Он не является официальным
+        ресурсом какой-либо авиакомпании или работодателя, не связан с ними и не действует от их имени. Все расчёты ориентировочные
+        и <b>не являются официальным документом</b>: размер оплаты определяет только работодатель.</p>
+      </div>
+
+      <div class="card legal-body">
+        ${sec(1, 'Термины', `
+          <p><b>Сервис</b> — сайт crewpay.uz и его функции. <b>Администратор</b> — лицо, которое управляет Сервисом (сведения — в разделе «Контакты и реквизиты»).
+          <b>Пользователь</b> — лицо, зарегистрировавшееся в Сервисе. <b>Pro</b> — платный набор функций.</p>`)}
+        ${sec(2, 'Справочный характер расчётов', `
+          <p>Сервис помогает пользователю самостоятельно оценить налёт часов и ориентировочную оплату труда по данным, которые пользователь вводит сам.
+          Результаты носят исключительно информационный характер и не являются расчётным листком, бухгалтерским, кадровым, налоговым
+          или иным официальным документом, а также не могут служить основанием для требований к работодателю или третьим лицам.</p>
+          <p>Справочные значения (ставки, коэффициенты, нормы) могут быть неполными, устаревшими или отличаться от действующих у конкретного
+          работодателя. Пользователь самостоятельно проверяет их и результаты расчётов. Официальными являются только документы работодателя.</p>`)}
+        ${sec(3, 'Регистрация и доступ', `
+          <p>Регистрация не гарантирует доступ. Администратор по своему усмотрению открывает, ограничивает или закрывает доступ к Сервису
+          и отдельным функциям, в том числе без объяснения причин. Сервис предназначен для личного использования; аккаунт нельзя передавать
+          другим лицам. Пользователь не распространяет сведения, полученные в Сервисе, и сам отвечает за соблюдение своих обязательств
+          перед работодателем, включая обязательства о конфиденциальности.</p>`)}
+        ${sec(4, 'Документы пользователя', `
+          <p>Пользователь загружает только собственные документы (например, свой расчётный листок) и подтверждает, что вправе это делать.
+          Сервис использует загруженные файлы только для расчётов и сверки по просьбе самого пользователя и не передаёт их третьим лицам.
+          Пользователь может удалить загруженный листок в любой момент.</p>`)}
+        ${sec(5, 'Ограничение ответственности', `
+          <p>Сервис предоставляется «как есть». Администратор не гарантирует точность, полноту и актуальность расчётов, бесперебойную работу
+          Сервиса и сохранность данных и не несёт ответственности за решения, принятые пользователем на основе расчётов, за расхождения
+          с начислениями работодателя, за прямые или косвенные убытки и упущенную выгоду, а также за содержание документов и сведений,
+          которые вводит или загружает пользователь.</p>
+          <p>Если ответственность Администратора не может быть исключена по закону, она ограничена суммой, уплаченной пользователем
+          за текущий оплаченный период Pro.</p>`)}
+        ${sec(6, 'Персональные данные', `
+          <p>Сервис обрабатывает: email, имя, пароль (только в виде необратимого хеша), введённые данные расчётов и загруженные пользователем
+          документы, которые могут содержать ФИО, табельный номер и суммы начислений. Цель обработки — работа Сервиса для самого пользователя.</p>
+          <p>Данные не продаются и не передаются третьим лицам, кроме случаев, предусмотренных законом. При оплате платёжной системе
+          (Payme, Click) передаются только номер заказа и сумма; данные карты вводятся на стороне платёжной системы и Сервису недоступны.</p>
+          <p>Данные хранятся, пока существует аккаунт. Удалить аккаунт и все данные можно по запросу на контакты ниже.
+          Регистрируясь, пользователь даёт согласие на обработку своих персональных данных на этих условиях в соответствии
+          с Законом Республики Узбекистан «О персональных данных».</p>`)}
+        ${sec(7, 'Подписка Pro (публичная оферта)', `
+          <p>Настоящий раздел — публичная оферта. Оплата Pro означает полное принятие этих условий. Стоимость — ${price};
+          доступны сроки 1, 3, 6 и 12 месяцев. Pro включается автоматически после подтверждения оплаты платёжной системой
+          и действует до даты, указанной на странице «Подписка»; при продлении срок добавляется к текущему.</p>
+          <p>Возврат: если функции Pro были недоступны по вине Сервиса, либо в течение 3 дней с оплаты при неиспользовании Pro — по обращению
+          на контакты ниже. Если Администратор закрыл доступ без нарушения пользователем этих условий, возвращается стоимость неиспользованных
+          полных месяцев.</p>`)}
+        ${sec(8, 'Изменение условий', `
+          <p>Администратор может изменять эти условия, публикуя новую редакцию на этой странице. Продолжение использования Сервиса
+          после публикации означает согласие с новой редакцией.</p>`)}
+        ${sec(9, 'Применимое право', `
+          <p>К отношениям сторон применяется законодательство Республики Узбекистан. Споры решаются переговорами, а при недостижении
+          согласия — в суде по месту нахождения Администратора.</p>`)}
+        ${sec(10, 'Товарные знаки', `
+          <p>Названия компаний, документов и платёжных систем упоминаются только для описания и принадлежат их правообладателям.
+          Их упоминание не означает связи с ними или их одобрения.</p>`)}
+      </div>
+
+      <div class="card" id="contacts">
+        <div class="card-head">${icon('info')}<h2>Контакты и реквизиты</h2></div>
+        ${
+          l.operator
+            ? `<p><b>${esc(l.operator)}</b>${l.inn ? ` · ИНН ${esc(l.inn)}` : ''}</p>`
+            : '<p class="muted small">Реквизиты исполнителя будут опубликованы до начала приёма платежей.</p>'
+        }
+        <ul class="legal-contacts">${contacts}</ul>
+      </div>
+
+      <button class="card to-calc" data-view="${access === 'active' ? 'calc' : 'profile'}">
+        <span>${icon(access === 'active' ? 'calc' : 'user')}<span>${access === 'active' ? 'К расчёту' : 'Вход и регистрация'}</span></span>${icon('chevron', 'icon rot-90')}
+      </button>
+    </article>`;
+}
+
 let authMode: 'login' | 'register' = 'login';
+
+function bindAuth(root: HTMLElement) {
+  if (serverUp && !account && authMode === 'register') startPow();
+  root.querySelectorAll<HTMLButtonElement>('[data-auth]').forEach((b) =>
+    b.addEventListener('click', () => {
+      authMode = b.dataset.auth as 'login' | 'register';
+      if (authMode === 'login') resetPow();
+      renderView();
+      $<HTMLInputElement>('#a-email', root)?.focus();
+    }),
+  );
+  $<HTMLFormElement>('#auth-form', root)?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target as HTMLFormElement);
+    const email = String(fd.get('email') ?? '').trim();
+    const password = String(fd.get('password') ?? '');
+    const err = $('#auth-error', root)!;
+    const btn = $<HTMLButtonElement>('#auth-form [type=submit]', root)!;
+    const fail = (msg: string) => {
+      err.textContent = msg;
+      err.hidden = false;
+    };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('Проверьте email.');
+    if (password.length < 8) return fail('Пароль — минимум 8 символов.');
+    if (authMode === 'register' && !fd.get('accept')) return fail('Отметьте согласие с условиями использования.');
+    btn.disabled = true;
+    try {
+      if (authMode === 'register') {
+        btn.textContent = 'Проверка…';
+        await registerWithPow({ email, password, name: String(fd.get('name') ?? '').trim(), website: String(fd.get('website') ?? ''), accept: true });
+      } else await api.login(email, password);
+      await loadAccount();
+      if (access === 'active' && view === 'legal') view = 'calc';
+      renderShell();
+      toast(access === 'active' ? (authMode === 'register' ? 'Аккаунт создан' : 'Вы вошли') : authMode === 'register' ? 'Заявка отправлена' : 'Вы вошли');
+    } catch (ex) {
+      btn.disabled = false;
+      btn.textContent = authMode === 'login' ? 'Войти' : 'Создать аккаунт';
+      // Решение одноразовое — для следующей попытки готовим новое.
+      if (authMode === 'register') startPow();
+      if (ex instanceof ApiError && ex.status === 409 && authMode === 'register') {
+        // Такой email уже есть — переключаем на вход и сохраняем введённый адрес.
+        authMode = 'login';
+        resetPow();
+        renderView();
+        $<HTMLInputElement>('#a-email', root)!.value = email;
+        $('#auth-error', root)!.textContent = 'Этот email уже зарегистрирован — введите пароль, чтобы войти.';
+        $('#auth-error', root)!.hidden = false;
+        $<HTMLInputElement>('#a-password', root)?.focus();
+        return;
+      }
+      fail(ex instanceof ApiError ? ex.message : ex instanceof Error ? ex.message : 'Сервер недоступен, попробуйте позже.');
+    }
+  });
+}
+
+/** Форма входа и регистрации — на приветственной странице для гостей. */
+function authCardHtml(): string {
+  return `
+      <form class="card auth" id="auth-form" novalidate>
+        <div class="segmented" role="tablist">
+          <button type="button" class="seg${authMode === 'login' ? ' active' : ''}" data-auth="login">${icon('user')}<span>Вход</span></button>
+          <button type="button" class="seg${authMode === 'register' ? ' active' : ''}" data-auth="register">${icon('plus')}<span>Регистрация</span></button>
+        </div>
+        <p class="muted small">${
+          authMode === 'login'
+            ? 'Войдите, если администратор уже открыл вам доступ.'
+            : 'После регистрации администратор проверит заявку и откроет доступ. Нужны только email и пароль.'
+        }</p>
+        ${
+          authMode === 'register'
+            ? `<div class="field"><label class="field-label" for="a-name">${icon('user')}<span>Имя</span></label><input id="a-name" name="name" type="text" autocomplete="name" placeholder="Как к вам обращаться" /></div>`
+            : ''
+        }
+        <div class="field"><label class="field-label" for="a-email">${icon('info')}<span>Email</span></label><input id="a-email" name="email" type="email" autocomplete="email" required placeholder="name@mail.com" value="${esc(profile?.email ?? '')}" /></div>
+        <div class="field"><label class="field-label" for="a-password">${icon('shield')}<span>Пароль</span></label><input id="a-password" name="password" type="password" autocomplete="${authMode === 'login' ? 'current-password' : 'new-password'}" required minlength="8" placeholder="${authMode === 'login' ? '' : 'Минимум 8 символов'}" /></div>
+        ${
+          authMode === 'register'
+            ? `<div class="hp" aria-hidden="true"><label>Сайт <input name="website" type="text" tabindex="-1" autocomplete="off" /></label></div>
+               <p class="pow-status small" id="pow-status">${powStatusHtml()}</p>`
+            : ''
+        }
+        ${
+          authMode === 'register'
+            ? `<label class="consent"><input type="checkbox" name="accept" id="a-accept" />
+                 <span>Я принимаю <button type="button" class="link" data-view="legal">условия использования</button> и даю согласие на обработку моих персональных данных</span></label>`
+            : ''
+        }
+        <p class="form-error" id="auth-error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">${authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button>
+      </form>`;
+}
+
 
 function renderProfile(root: HTMLElement) {
   const p: Profile = profile ?? { name: '', email: '', employeeId: '', organization: '', department: '', createdAt: '' };
@@ -2668,38 +3050,6 @@ function renderProfile(root: HTMLElement) {
       <input id="p-${name}" type="${type}" name="${name}" value="${esc(p[name])}" placeholder="${esc(ph)}" autocomplete="off" />
     </div>`;
 
-  const authCard =
-    serverUp && !account
-      ? `
-      <form class="card auth" id="auth-form" novalidate>
-        <div class="segmented" role="tablist">
-          <button type="button" class="seg${authMode === 'login' ? ' active' : ''}" data-auth="login">${icon('user')}<span>Вход</span></button>
-          <button type="button" class="seg${authMode === 'register' ? ' active' : ''}" data-auth="register">${icon('plus')}<span>Регистрация</span></button>
-        </div>
-        <p class="muted small">${
-          authMode === 'login'
-            ? 'Войдите, чтобы загружать расчётные листки и видеть расчёты на любом устройстве.'
-            : `Аккаунт хранит расчёты и листки в облаке. Нужны только email и пароль.${
-                (planInfo?.trialDays ?? 0) > 0 ? ` Первые ${planInfo!.trialDays} ${plural(planInfo!.trialDays, 'день', 'дня', 'дней')} — Pro бесплатно.` : ''
-              }`
-        }</p>
-        ${
-          authMode === 'register'
-            ? `<div class="field"><label class="field-label" for="a-name">${icon('user')}<span>Имя</span></label><input id="a-name" name="name" type="text" autocomplete="name" placeholder="Как к вам обращаться" /></div>`
-            : ''
-        }
-        <div class="field"><label class="field-label" for="a-email">${icon('info')}<span>Email</span></label><input id="a-email" name="email" type="email" autocomplete="email" required placeholder="name@mail.com" value="${esc(profile?.email ?? '')}" /></div>
-        <div class="field"><label class="field-label" for="a-password">${icon('shield')}<span>Пароль</span></label><input id="a-password" name="password" type="password" autocomplete="${authMode === 'login' ? 'current-password' : 'new-password'}" required minlength="8" placeholder="${authMode === 'login' ? '' : 'Минимум 8 символов'}" /></div>
-        ${
-          authMode === 'register'
-            ? `<div class="hp" aria-hidden="true"><label>Сайт <input name="website" type="text" tabindex="-1" autocomplete="off" /></label></div>
-               <p class="pow-status small" id="pow-status">${powStatusHtml()}</p>`
-            : ''
-        }
-        <p class="form-error" id="auth-error" role="alert" hidden></p>
-        <button class="btn primary" type="submit">${authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button>
-      </form>`
-      : '';
   const migrateCard =
     account && pendingLocal.length
       ? `
@@ -2712,7 +3062,6 @@ function renderProfile(root: HTMLElement) {
 
   root.innerHTML = `
     <section class="page">
-      ${authCard}
       ${migrateCard}
       <div class="profile-head card">
         <div class="avatar big">${p.name ? `<span>${esc(initials(p.name))}</span>` : icon('user')}</div>
@@ -2748,6 +3097,11 @@ function renderProfile(root: HTMLElement) {
         }
       </div>
 
+      ${
+        plan?.admin
+          ? `<button class="card to-calc plan-link" data-pro><span>${icon('shield')}<span>Пользователи и доступ</span></span><b class="plan-state">администратор</b>${icon('chevron', 'icon rot-90')}</button>`
+          : ''
+      }
       ${
         serverUp
           ? `<button class="card to-calc plan-link" data-pro><span>${icon('crown')}<span>Подписка</span></span><b class="plan-state">${esc(planLabel())}</b>${icon('chevron', 'icon rot-90')}</button>`
@@ -2793,56 +3147,6 @@ function renderProfile(root: HTMLElement) {
   });
 
   $('[data-goto=settings]', root)?.addEventListener('click', () => go('settings'));
-  if (serverUp && !account && authMode === 'register') startPow();
-  root.querySelectorAll<HTMLButtonElement>('[data-auth]').forEach((b) =>
-    b.addEventListener('click', () => {
-      authMode = b.dataset.auth as 'login' | 'register';
-      if (authMode === 'login') resetPow();
-      renderProfile(root);
-      $<HTMLInputElement>('#a-email', root)?.focus();
-    }),
-  );
-  $<HTMLFormElement>('#auth-form', root)?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target as HTMLFormElement);
-    const email = String(fd.get('email') ?? '').trim();
-    const password = String(fd.get('password') ?? '');
-    const err = $('#auth-error', root)!;
-    const btn = $<HTMLButtonElement>('#auth-form [type=submit]', root)!;
-    const fail = (msg: string) => {
-      err.textContent = msg;
-      err.hidden = false;
-    };
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('Проверьте email.');
-    if (password.length < 8) return fail('Пароль — минимум 8 символов.');
-    btn.disabled = true;
-    try {
-      if (authMode === 'register') {
-        btn.textContent = 'Проверка…';
-        await registerWithPow({ email, password, name: String(fd.get('name') ?? '').trim(), website: String(fd.get('website') ?? '') });
-      } else await api.login(email, password);
-      await loadAccount();
-      renderShell();
-      toast(authMode === 'register' ? 'Аккаунт создан' : 'Вы вошли');
-    } catch (ex) {
-      btn.disabled = false;
-      btn.textContent = authMode === 'login' ? 'Войти' : 'Создать аккаунт';
-      // Решение одноразовое — для следующей попытки готовим новое.
-      if (authMode === 'register') startPow();
-      if (ex instanceof ApiError && ex.status === 409 && authMode === 'register') {
-        // Такой email уже есть — переключаем на вход и сохраняем введённый адрес.
-        authMode = 'login';
-        resetPow();
-        renderProfile(root);
-        $<HTMLInputElement>('#a-email', root)!.value = email;
-        $('#auth-error', root)!.textContent = 'Этот email уже зарегистрирован — введите пароль, чтобы войти.';
-        $('#auth-error', root)!.hidden = false;
-        $<HTMLInputElement>('#a-password', root)?.focus();
-        return;
-      }
-      fail(ex instanceof ApiError ? ex.message : ex instanceof Error ? ex.message : 'Сервер недоступен, попробуйте позже.');
-    }
-  });
   $('[data-action=logout]', root)?.addEventListener('click', async () => {
     if (!(await ask('Выйти из аккаунта? Данные аккаунта будут удалены с этого устройства (в облаке они сохранятся).', 'Выйти')))
       return;
@@ -2858,6 +3162,9 @@ function renderProfile(root: HTMLElement) {
     pendingLocal = [];
     authMode = 'login';
     applyBackup(makeBackup(null, { ...defaultState(reg), theme: state.theme }, [], {}));
+    access = 'guest';
+    forgetAccess();
+    go('calc');
     toast('Вы вышли');
   });
   $('[data-action=migrate]', root)?.addEventListener('click', async (e) => {
@@ -2928,7 +3235,8 @@ function renderReference(root: HTMLElement) {
     <section class="page ref">
       <div class="page-head">
         <h1>Справочник</h1>
-        <p class="muted">Ставки и коэффициенты, по которым идёт расчёт. Прочерк — сочетание недоступно.</p>
+        <p class="muted">Ставки и коэффициенты, по которым идёт расчёт. Прочерк — сочетание недоступно.
+          Значения справочные и могут отличаться от действующих — сверяйтесь с документами работодателя. Не распространяйте их за пределами сервиса.</p>
       </div>
 
       <div class="card">
@@ -3137,7 +3445,21 @@ async function loadAccount() {
     account = me.user;
     plan = me.plan;
     proRequest = me.request;
+    access = me.access;
     rememberPlan();
+    if (access !== 'active') {
+      forgetAccess();
+      return;
+    }
+    if (!reg) {
+      const r = await fetchRegulation();
+      if (!r) {
+        access = 'offline';
+        return;
+      }
+      initData(r);
+    }
+    rememberAccess();
     const before = history.slice();
     applyServerProfile(me.profile);
     const { months } = await api.months();
@@ -3165,7 +3487,11 @@ async function loadAccount() {
     account = null;
     plan = null;
     proRequest = null;
-    if (e instanceof ApiError && e.status === 401) rememberPlan();
+    if (e instanceof ApiError && e.status === 401) {
+      access = 'guest';
+      rememberPlan();
+      forgetAccess();
+    }
   }
 }
 
@@ -3178,41 +3504,67 @@ declare global {
 }
 
 async function boot() {
-  reg = await loadRegulation();
-  state = loadState(reg);
   history = loadHistory();
   profile = loadProfile();
   salaries = loadSalaries();
+  if (!IS_EMBED && location.pathname.replace(/\/$/, '') === '/legal') view = 'legal';
 
-  // Предпросмотр может прийти с готовым аккаунтом — только если на устройстве ещё ничего нет.
-  if (!hasSavedState() && window.__CREWPAY_SEED__) {
-    const seed = parseBackup(reg, window.__CREWPAY_SEED__);
-    if (seed) {
-      profile = seed.profile;
-      state = seed.state;
-      history = seed.history;
-      salaries = seed.salaries;
-      saveProfile(profile);
-      saveState(state);
-      saveHistory(history);
-      saveSalaries(salaries);
+  if (IS_EMBED) {
+    // Предпросмотр без сервера: ставки встраиваются в файл (в обычную сборку эта ветка не попадает).
+    if (import.meta.env.VITE_TARGET === 'embed') initData((await import('../data/regulation.json')).default as Regulation);
+    access = 'active';
+    // Предпросмотр может прийти с готовым аккаунтом — только если на устройстве ещё ничего нет.
+    if (!hasSavedState() && window.__CREWPAY_SEED__) {
+      const seed = parseBackup(reg, window.__CREWPAY_SEED__);
+      if (seed) {
+        profile = seed.profile;
+        state = seed.state;
+        history = seed.history;
+        salaries = seed.salaries;
+        saveProfile(profile);
+        saveState(state);
+        saveHistory(history);
+        saveSalaries(salaries);
+      }
     }
-  }
-
-  if (!IS_EMBED) {
+  } else {
     serverUp = await api.available();
     if (serverUp) {
+      api.planInfo().then((i) => {
+        planInfo = i;
+        if (view === 'legal') renderView();
+      }).catch(() => {});
       await loadAccount();
       // Вернулись со страницы Payme / Click.
       const paid = Number(new URLSearchParams(location.search).get('paid'));
       if (Number.isSafeInteger(paid) && paid > 0) {
         window.history.replaceState(null, '', location.pathname);
         view = 'pro';
-        if (account) watchPayment(paid);
+        if (account && access === 'active') watchPayment(paid);
       }
-      api.planInfo().then((i) => (planInfo = i)).catch(() => {});
+    } else {
+      // Офлайн: работаем, только если доступ уже был открыт на этом устройстве.
+      const r = cachedRegulation();
+      let had = false;
+      try {
+        had = localStorage.getItem(ACCESS_KEY) === 'active';
+      } catch {
+        /* хранилище недоступно */
+      }
+      if (r && had) {
+        initData(r);
+        access = 'active';
+      } else access = 'offline';
     }
   }
+
+  // Ссылки на разделы внутри страниц (например, «условия использования» в форме регистрации).
+  app.addEventListener('click', (e) => {
+    const t = (e.target as HTMLElement).closest<HTMLElement>('#view [data-view]');
+    if (!t) return;
+    e.preventDefault();
+    go(t.dataset.view as View);
+  });
 
   // Кнопки «Pro» есть на разных страницах — один обработчик на всё приложение.
   app.addEventListener('click', (e) => {

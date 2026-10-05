@@ -16,6 +16,17 @@ export interface Plan {
   admin: boolean;
 }
 
+/** Решение администратора о доступе к приложению. */
+export type AccessState = 'pending' | 'active' | 'blocked';
+
+export interface LegalInfo {
+  operator?: string;
+  inn?: string;
+  email?: string;
+  telegram?: string;
+  phone?: string;
+}
+
 export interface PlanInfo {
   price: number;
   trialDays: number;
@@ -23,6 +34,7 @@ export interface PlanInfo {
   contactUrl: string;
   /** Подключённые способы онлайн-оплаты. */
   providers?: PayProvider[];
+  legal?: LegalInfo;
 }
 
 export type PayProvider = 'payme' | 'click';
@@ -47,6 +59,8 @@ export interface AdminUser {
   name: string;
   proUntil: string | null;
   proSource: string | null;
+  status: string;
+  access: AccessState;
   createdAt: string;
   plan: Plan;
 }
@@ -142,9 +156,10 @@ export const api = {
       return false;
     }
   },
-  me: () => req<{ user: Account; profile: ServerProfile; plan: Plan; request: ProRequest | null }>('api/me'),
+  me: () => req<{ user: Account; profile: ServerProfile; plan: Plan; access: AccessState; request: ProRequest | null }>('api/me', { cache: 'no-store' }),
+  regulation: () => req<unknown>('api/regulation', { cache: 'no-store' }),
   challenge: () => req<PowChallenge>('api/auth/challenge', { cache: 'no-store' }),
-  register: (body: { email: string; password: string; name: string; captcha: PowSolution; website: string }) =>
+  register: (body: { email: string; password: string; name: string; captcha: PowSolution; website: string; accept: boolean }) =>
     req<{ user: Account; plan: Plan }>('api/auth/register', { method: 'POST', json: body }),
   login: (email: string, password: string) => req<{ user: Account }>('api/auth/login', { method: 'POST', json: { email, password } }),
   logout: () => req<{ ok: true }>('api/auth/logout', { method: 'POST' }),
@@ -167,11 +182,13 @@ export const api = {
     req<{ request: ProRequest }>('api/subscription/request', { method: 'POST', json: { months, note } }),
   cancelProRequest: () => req<{ ok: true }>('api/subscription/request', { method: 'DELETE' }),
   adminSubscriptions: (q = '') =>
-    req<{ requests: AdminRequest[]; users: AdminUser[] }>(`api/admin/subscriptions${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    req<{ requests: AdminRequest[]; pending: AdminUser[]; users: AdminUser[] }>(`api/admin/subscriptions${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   adminGrant: (email: string, months: number) =>
     req<{ email: string; plan: Plan }>('api/admin/grant', { method: 'POST', json: { email, months } }),
   checkout: (provider: PayProvider, months: number) =>
     req<{ orderId: number; url: string }>('api/pay/checkout', { method: 'POST', json: { provider, months } }),
   order: (id: number) => req<{ order: PayOrder; plan: Plan }>(`api/pay/orders/${id}`, { cache: 'no-store' }),
+  adminAccess: (email: string, status: AccessState) =>
+    req<{ email: string; access: AccessState; plan: Plan }>('api/admin/access', { method: 'POST', json: { email, status } }),
   adminReject: (id: string) => req<{ ok: true }>(`api/admin/requests/${id}/reject`, { method: 'POST' }),
 };

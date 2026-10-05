@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import regJson from '../public/regulation.json';
+import regJson from '../data/regulation.json';
 import { type FlightForm, formatDuration, parseDuration, parseQuickLine, summarizeFlights } from '../src/calc/flights';
 import type { Regulation } from '../src/calc/types';
 

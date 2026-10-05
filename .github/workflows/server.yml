@@ -64,6 +64,8 @@ jobs:
                 [ -f /opt/crewpay/edge.env ] && grep EDGE_NETWORK /opt/crewpay/edge.env || true
                 echo "== сертификат"; echo | openssl s_client -connect crewpay.uz:443 -servername crewpay.uz 2>/dev/null | openssl x509 -noout -subject -enddate 2>/dev/null || echo "HTTPS для crewpay.uz пока нет"
                 echo "== снаружи"
+                echo "== пользователи (по статусу, без адресов)"
+                (cd /opt/crewpay && docker compose exec -T db psql -U crewpay crewpay -tAc "select coalesce(status,'?') || ': ' || count(*) from users group by status order by status" 2>/dev/null) || echo "нет данных"
                 echo "== превью и оплата"
                 curl -sS -o /dev/null -w "https://crewpay.uz/og.png → %{http_code} %{content_type}\n" --max-time 10 https://crewpay.uz/og.png || true
                 for ua in TelegramBot WhatsApp/2.23 facebookexternalhit/1.1 Twitterbot/1.0; do

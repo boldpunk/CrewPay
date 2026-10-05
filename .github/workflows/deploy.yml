@@ -146,6 +146,11 @@ jobs:
             CLICK_SERVICE_ID=${{ vars.CLICK_SERVICE_ID }}
             CLICK_MERCHANT_ID=${{ vars.CLICK_MERCHANT_ID }}
             CLICK_SECRET_KEY=${{ secrets.CLICK_SECRET_KEY }}
+            LEGAL_OPERATOR=${{ vars.LEGAL_OPERATOR }}
+            LEGAL_INN=${{ vars.LEGAL_INN }}
+            CONTACT_EMAIL=${{ vars.CONTACT_EMAIL }}
+            CONTACT_TELEGRAM=${{ vars.CONTACT_TELEGRAM }}
+            CONTACT_PHONE=${{ vars.CONTACT_PHONE }}
             ENVEOF
             # Пароль своей базы создаётся один раз и остаётся на сервере (в логи не попадает).
             if [ ! -f /opt/crewpay/db.env ]; then

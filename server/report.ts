@@ -455,7 +455,7 @@ export async function renderReport(reg: Regulation, input: ReportInput): Promise
     doc.font('semi').fillColor(C.teal).text(` ${host}`, { link: input.siteUrl, underline: false, continued: true, lineBreak: false });
     doc.font('body').fillColor(C.muted).text(` · ${fmtDateTime(input.generatedAt)}`, { lineBreak: false });
     doc.font('body').fontSize(6.6).fillColor(C.muted).text(
-      'Справочный расчёт CrewPay; не заменяет расчётный листок работодателя.',
+      'Справочный расчёт CrewPay. Не является официальным документом и не заменяет расчётный листок работодателя.',
       M + 20,
       fy + 20,
       { lineBreak: false },

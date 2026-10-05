@@ -15,8 +15,9 @@ if (!DATABASE_URL) {
 }
 const PORT = Number(process.env.PORT ?? 3000);
 const STATIC_DIR = process.env.STATIC_DIR ?? fileURLToPath(new URL('../dist/', import.meta.url));
-// Справочник можно вынести в том (volume) и править без пересборки.
-const REGULATION_PATH = process.env.REGULATION_PATH ?? `${STATIC_DIR}regulation.json`;
+// Справочник ставок не лежит среди статических файлов: его получают только пользователи с открытым доступом.
+// Можно вынести в том (volume) и править без пересборки.
+const REGULATION_PATH = process.env.REGULATION_PATH ?? fileURLToPath(new URL('../data/regulation.json', import.meta.url));
 
 let cached: { mtime: number; reg: Regulation } | null = null;
 async function regulation(): Promise<Regulation> {
@@ -53,6 +54,13 @@ const app = createApp({
         ? { serviceId: process.env.CLICK_SERVICE_ID, merchantId: process.env.CLICK_MERCHANT_ID, secretKey: process.env.CLICK_SECRET_KEY }
         : undefined,
   },
+  legal: {
+    operator: process.env.LEGAL_OPERATOR ?? '',
+    inn: process.env.LEGAL_INN ?? '',
+    email: process.env.CONTACT_EMAIL ?? '',
+    telegram: process.env.CONTACT_TELEGRAM ?? '',
+    phone: process.env.CONTACT_PHONE ?? '',
+  },
   plan: {
     trialDays: Number(process.env.PRO_TRIAL_DAYS || 7),
     price: Number(process.env.PRO_PRICE || 29000),
@@ -61,10 +69,8 @@ const app = createApp({
   },
 });
 
-app.get('/regulation.json', async (c) => {
-  c.header('cache-control', 'no-cache');
-  return c.json(await regulation());
-});
+// Относительные пути сборки ломаются на адресе со слешем в конце.
+app.get('/legal/', (c) => c.redirect('/legal', 301));
 app.use('/assets/*', serveStatic({ root: STATIC_DIR, onFound: (_p, c) => c.header('cache-control', 'public, max-age=31536000, immutable') }));
 app.use('*', serveStatic({ root: STATIC_DIR }));
 // Одностраничное приложение: всё, что не файл и не API, отдаёт index.html.

@@ -39,7 +39,7 @@ export async function createSession(db: DB, userId: string): Promise<{ token: st
 export async function userBySession(db: DB, token: string | undefined) {
   if (!token || token.length > 100) return null;
   const rows = await db
-    .select({ id: users.id, email: users.email, name: users.name, createdAt: users.createdAt, proUntil: users.proUntil, proSource: users.proSource })
+    .select({ id: users.id, email: users.email, name: users.name, createdAt: users.createdAt, proUntil: users.proUntil, proSource: users.proSource, status: users.status })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
     .where(and(eq(sessions.id, sha256(token)), gt(sessions.expiresAt, new Date())))

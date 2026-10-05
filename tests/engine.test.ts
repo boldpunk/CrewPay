@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import regJson from '../public/regulation.json';
+import regJson from '../data/regulation.json';
 import { availableAircraft, calculateMonth, findPosition } from '../src/calc/engine';
 import { num, parseHours } from '../src/calc/format';
 import { paymentSchedule } from '../src/calc/paydates';
