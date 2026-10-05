@@ -23,3 +23,15 @@ jobs:
           done
           curl -sSI --max-time 15 -A TelegramBot https://crewpay.uz/og.png | grep -iE '^(HTTP|content-type|content-length):'
           echo "== IPv6"; curl -6 -sS -o /dev/null --max-time 10 -w '%{http_code}\n' https://crewpay.uz/ || echo "IPv6 с раннера недоступен (у раннера может не быть IPv6)"
+      - name: Разница между / и /?1
+        run: |
+          UA='TelegramBot (like TwitterBot)'
+          for u in https://crewpay.uz https://crewpay.uz/ 'https://crewpay.uz/?1'; do
+            echo "== $u"
+            echo "GET:   $(curl -sS -o /tmp/b -A "$UA" --max-time 15 -w '%{http_code} %{size_download}B %{content_type} redirects=%{num_redirects}' "$u") og:title=$(grep -c 'og:title' /tmp/b)"
+            echo "HEAD:  $(curl -sS -I -o /dev/null -A "$UA" --max-time 15 -w '%{http_code} %{content_type}' "$u")"
+            echo "RANGE: $(curl -sS -o /tmp/r -H 'Range: bytes=0-4095' -A "$UA" --max-time 15 -w '%{http_code} %{size_download}B' "$u") og:title=$(grep -c 'og:title' /tmp/r)"
+            echo "HTTP1: $(curl -sS --http1.1 -o /tmp/h -A "$UA" --max-time 15 -w '%{http_code}' "$u") og:title=$(grep -c 'og:title' /tmp/h)"
+          done
+          echo "== заголовки /"; curl -sSI -A "$UA" https://crewpay.uz/ | tr -d '\r'
+
