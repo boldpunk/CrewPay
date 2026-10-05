@@ -66,6 +66,10 @@ jobs:
                 echo "== снаружи"
                 echo "== превью и оплата"
                 curl -sS -o /dev/null -w "https://crewpay.uz/og.png → %{http_code} %{content_type}\n" --max-time 10 https://crewpay.uz/og.png || true
+                for ua in TelegramBot WhatsApp/2.23 facebookexternalhit/1.1 Twitterbot/1.0; do
+                  echo "$ua: $(curl -sS --max-time 10 -A "$ua" https://crewpay.uz/ | grep -oE 'property="og:(title|image)" content="[^"]*"' | sed 's/property="og://; s/" content=/=/' | tr '\n' ' ')"
+                done
+                curl -sSI --max-time 10 -A TelegramBot https://crewpay.uz/og.png | grep -iE '^(content-length|cross-origin-resource-policy|cache-control):' | tr -d '\r'
                 curl -sS --max-time 10 -X POST -H 'content-type: application/json' -d '{"id":1,"method":"CheckTransaction","params":{"id":"x"}}' https://crewpay.uz/payments/payme | grep -o '"code":-[0-9]*' | sed 's/^/payme endpoint → /' || true
                 curl -sS --max-time 10 -X POST -d 'action=0' https://crewpay.uz/payments/click/prepare | grep -o '"error":-[0-9]*' | sed 's/^/click endpoint → /' || true
                 for site in crewpay.uz www.crewpay.uz boldpunk.uz fyndue.uz; do
