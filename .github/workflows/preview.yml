@@ -1,0 +1,25 @@
+name: Preview check
+
+# Проверка превью ссылок снаружи (с серверов GitHub), как его видят Telegram и WhatsApp.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: DNS
+        run: |
+          for h in crewpay.uz www.crewpay.uz; do
+            for t in A AAAA CAA; do echo "$h $t: $(dig +short $t $h @1.1.1.1 | tr '\n' ' ')"; done
+          done
+      - name: Как видят мессенджеры
+        run: |
+          for url in https://crewpay.uz/ https://www.crewpay.uz/; do
+            for ua in TelegramBot "WhatsApp/2.23" "facebookexternalhit/1.1"; do
+              out=$(curl -sSL --max-time 15 -A "$ua" -w '\n%{http_code} %{remote_ip} %{time_total}s' "$url" || echo "ОШИБКА")
+              echo "$url [$ua] → $(echo "$out" | tail -1) | $(echo "$out" | grep -oE 'property="og:(title|image)" content="[^"]*"' | sed 's/property="og://; s/" content=/=/' | tr '\n' ' ')"
+            done
+          done
+          curl -sSI --max-time 15 -A TelegramBot https://crewpay.uz/og.png | grep -iE '^(HTTP|content-type|content-length):'
+          echo "== IPv6"; curl -6 -sS -o /dev/null --max-time 10 -w '%{http_code}\n' https://crewpay.uz/ || echo "IPv6 с раннера недоступен (у раннера может не быть IPv6)"
