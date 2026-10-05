@@ -14,9 +14,11 @@ import {
   SESSION_COOKIE,
   SESSION_DAYS,
   createSession,
+  deleteOtherSessions,
   deleteSession,
   hashPassword,
   normalizeEmail,
+  tempPassword,
   userBySession,
   validEmail,
   verifyPassword,
@@ -146,6 +148,7 @@ export function createApp(opts: AppOptions) {
   const checkoutLimiter = new RateLimiter(20, 60 * 60_000);
   const payments = opts.payments ?? {};
   const loginLimiter = new RateLimiter(10, 15 * 60_000);
+  const passwordLimiter = new RateLimiter(10, 15 * 60_000);
   const registerLimiter = new RateLimiter(opts.registerLimit ?? 5, 60 * 60_000);
 
   const ip = (c: Context) =>
@@ -319,6 +322,21 @@ export function createApp(opts: AppOptions) {
     return c.json({ user: { id: u.id, email: u.email, name: u.name }, plan: planOf(u), access: accessOf(u) });
   });
 
+  app.post('/api/auth/password', bodyLimit({ maxSize: 8 * 1024 }), async (c) => {
+    const u = requireUser(c);
+    if (!passwordLimiter.take(u.id)) throw new HttpError(429, 'Слишком много попыток, подождите 15 минут');
+    const body = z.object({ current: z.string().max(200), next: z.string().max(200) }).parse(await c.req.json());
+    if (body.next.length < 8) throw new HttpError(400, 'Новый пароль — минимум 8 символов', 'next');
+    if (body.next === body.current) throw new HttpError(400, 'Новый пароль совпадает с текущим', 'next');
+    const [row] = await db.select({ hash: users.passwordHash }).from(users).where(eq(users.id, u.id)).limit(1);
+    if (!row || !(await verifyPassword(body.current, row.hash))) throw new HttpError(400, 'Текущий пароль указан неверно', 'current');
+    await db.update(users).set({ passwordHash: await hashPassword(body.next) }).where(eq(users.id, u.id));
+    // Если пароль узнал кто-то ещё — его сессии закрываются; текущая остаётся.
+    await deleteOtherSessions(db, u.id, getCookie(c, SESSION_COOKIE));
+    passwordLimiter.reset(u.id);
+    return c.json({ ok: true });
+  });
+
   app.post('/api/auth/logout', async (c) => {
     await deleteSession(db, getCookie(c, SESSION_COOKIE));
     deleteCookie(c, SESSION_COOKIE, { path: '/' });
@@ -475,6 +493,21 @@ export function createApp(opts: AppOptions) {
     console.log(`access: ${admin.email} → ${email}: ${body.status}`);
     const next = { ...u, ...set };
     return c.json({ email: u.email, access: accessOf(next as typeof u), plan: planOf(next as typeof u) });
+  });
+
+  // Восстановления по почте нет — администратор выдаёт временный пароль и передаёт его пользователю.
+  app.post('/api/admin/password-reset', bodyLimit({ maxSize: 4 * 1024 }), async (c) => {
+    const admin = requireAdmin(c);
+    const body = z.object({ email: z.string().max(254) }).parse(await c.req.json());
+    const email = normalizeEmail(body.email);
+    if (admins.has(email)) throw new HttpError(400, 'Свой пароль меняйте в профиле');
+    const [u] = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.email, email)).limit(1);
+    if (!u) throw new HttpError(404, 'Пользователь с таким email не найден');
+    const password = tempPassword();
+    await db.update(users).set({ passwordHash: await hashPassword(password) }).where(eq(users.id, u.id));
+    await deleteOtherSessions(db, u.id);
+    console.log(`password reset: ${admin.email} → ${email}`);
+    return c.json({ email: u.email, password });
   });
 
   app.post('/api/admin/requests/:id/reject', async (c) => {

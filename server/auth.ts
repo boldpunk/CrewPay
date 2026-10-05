@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { and, eq, gt, lt } from 'drizzle-orm';
+import { and, eq, gt, lt, ne } from 'drizzle-orm';
 import type { DB } from './db';
 import { sessions, users } from './schema';
 
@@ -49,6 +49,20 @@ export async function userBySession(db: DB, token: string | undefined) {
 
 export async function deleteSession(db: DB, token: string | undefined) {
   if (token) await db.delete(sessions).where(eq(sessions.id, sha256(token)));
+}
+
+/** После смены пароля — выйти на всех устройствах, кроме текущего (или везде, если токена нет). */
+export async function deleteOtherSessions(db: DB, userId: string, keepToken?: string) {
+  await db
+    .delete(sessions)
+    .where(keepToken ? and(eq(sessions.userId, userId), ne(sessions.id, sha256(keepToken))) : eq(sessions.userId, userId));
+}
+
+/** Временный пароль: без похожих символов (0/O, 1/l/I), чтобы его можно было продиктовать. */
+export function tempPassword(length = 10): string {
+  const abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = randomBytes(length);
+  return Array.from(bytes, (b) => abc[b % abc.length]).join('');
 }
 
 export async function purgeExpiredSessions(db: DB) {

@@ -163,6 +163,8 @@ export const api = {
     req<{ user: Account; plan: Plan }>('api/auth/register', { method: 'POST', json: body }),
   login: (email: string, password: string) => req<{ user: Account }>('api/auth/login', { method: 'POST', json: { email, password } }),
   logout: () => req<{ ok: true }>('api/auth/logout', { method: 'POST' }),
+  changePassword: (current: string, next: string) =>
+    req<{ ok: true }>('api/auth/password', { method: 'POST', json: { current, next } }),
   saveProfile: (p: ServerProfile) => req<{ profile: ServerProfile }>('api/profile', { method: 'PUT', json: p }),
   months: () => req<{ months: ServerMonth[] }>('api/months'),
   saveMonth: (month: string, state: unknown, payslipId: string | null) =>
@@ -190,5 +192,7 @@ export const api = {
   order: (id: number) => req<{ order: PayOrder; plan: Plan }>(`api/pay/orders/${id}`, { cache: 'no-store' }),
   adminAccess: (email: string, status: AccessState) =>
     req<{ email: string; access: AccessState; plan: Plan }>('api/admin/access', { method: 'POST', json: { email, status } }),
+  adminResetPassword: (email: string) =>
+    req<{ email: string; password: string }>('api/admin/password-reset', { method: 'POST', json: { email } }),
   adminReject: (id: string) => req<{ ok: true }>(`api/admin/requests/${id}/reject`, { method: 'POST' }),
 };

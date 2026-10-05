@@ -61,6 +61,32 @@ let profile: Profile | null = null;
 let salaries: Record<string, string> = {};
 let view: View = 'calc';
 let lastResult: MonthResult | null = null;
+/** Последняя показанная сумма «К выплате» — от неё «докручиваем» до новой. */
+let shownNet: number | null = null;
+let netAnim = 0;
+
+const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+
+/** Сумма плавно перетекает к новому значению (как счётчик), а не прыгает. */
+function animateNet(el: HTMLElement, to: number) {
+  cancelAnimationFrame(netAnim);
+  const from = shownNet;
+  shownNet = to;
+  const paint = (v: number) => (el.innerHTML = `${money(v)}<span class="cur">сум</span>`);
+  if (from === null || from === to || reducedMotion()) return paint(to);
+  el.classList.remove('bump');
+  void el.offsetWidth;
+  el.classList.add('bump');
+  const start = performance.now();
+  const dur = Math.min(700, 260 + Math.log10(Math.abs(to - from) + 1) * 60);
+  const step = (t: number) => {
+    const k = Math.min(1, (t - start) / dur);
+    const e = 1 - Math.pow(1 - k, 3);
+    paint(k < 1 ? Math.round(from + (to - from) * e) : to);
+    if (k < 1) netAnim = requestAnimationFrame(step);
+  };
+  netAnim = requestAnimationFrame(step);
+}
 /** Сервер доступен (на статическом хостинге и в предпросмотре — нет). */
 let serverUp = false;
 let account: Account | null = null;
@@ -377,10 +403,18 @@ function renderShell() {
 }
 
 function go(v: View) {
+  const from = TABS.findIndex(([id]) => id === view);
+  const to = TABS.findIndex(([id]) => id === v);
   view = v;
   syncPath();
   renderShell();
   window.scrollTo({ top: 0 });
+  // Переход между разделами: страница въезжает с той стороны, куда идём по вкладкам.
+  const el = $('#view');
+  if (el && !reducedMotion()) {
+    el.classList.add('enter', to >= 0 && from >= 0 && to < from ? 'from-left' : 'from-right');
+    setTimeout(() => el.classList.remove('enter', 'from-left', 'from-right'), 700);
+  }
 }
 
 /** У страницы условий свой адрес — его можно дать платёжной системе: crewpay.uz/legal. */
@@ -1445,6 +1479,9 @@ function renderResult() {
     </div>
   `;
 
+  const hv = $('.hero-value', root);
+  if (hv && ok) animateNet(hv, result.net);
+  else if (!ok) shownNet = null;
   $('[data-action=save-history]', root)?.addEventListener('click', saveToHistory);
   $<HTMLButtonElement>('[data-action=pdf]', root)?.addEventListener('click', (e) => downloadReport(e.currentTarget as HTMLButtonElement));
   $('[data-action=copy]', root)?.addEventListener('click', () => copySummary(result, extraLines));
@@ -2235,7 +2272,7 @@ function renderHistory(root: HTMLElement) {
         </ul>`
           : `<div class="empty card">${icon('history', 'icon empty-icon')}<p>Пока пусто. Посчитайте месяц или загрузите расчётный листок — и нажмите «Сохранить».</p><button class="btn primary" data-go="calc">${icon('calc')}К расчёту</button></div>`
       }
-      ${account ? `<div class="card" id="slips"><div class="card-head">${icon('receipt')}<h2>Расчётные листки</h2></div><p class="muted small">Загружаю…</p></div>` : ''}
+      ${account ? `<div class="card" id="slips"><div class="card-head">${icon('receipt')}<h2>Расчётные листки</h2></div><div class="skeleton"><i></i><i></i><i></i></div></div>` : ''}
     </section>`;
   if (account) loadSlips(root);
 
@@ -2560,7 +2597,7 @@ function renderPro(root: HTMLElement) {
           </select>
           <button class="btn primary" type="submit">Применить</button>
         </form>
-        <div id="admin-body"><p class="muted small">Загружаю…</p></div>
+        <div id="admin-body"><div class="skeleton"><i></i><i></i><i></i></div></div>
       </div>`
     : '';
 
@@ -2720,7 +2757,8 @@ function bindAdmin(root: HTMLElement) {
             ${
               u.plan.admin
                 ? ''
-                : `<div class="admin-actions">${
+                : `<div class="admin-actions">
+                    <button class="btn small ghost" data-reset="${esc(u.email)}" title="Сбросить пароль">${icon('key')}<span class="hide-sm">Пароль</span></button>${
                     u.access === 'active'
                       ? `<button class="btn small ghost danger" data-access="${esc(u.email)}" data-status="blocked">Закрыть доступ</button>`
                       : `<button class="btn small" data-access="${esc(u.email)}" data-status="active">Открыть доступ</button>`
@@ -2731,6 +2769,18 @@ function bindAdmin(root: HTMLElement) {
           .join('')}</ul>`;
       body.querySelectorAll<HTMLButtonElement>('[data-grant]').forEach((b) =>
         b.addEventListener('click', () => grant(b.dataset.grant!, Number(b.dataset.months))),
+      );
+      body.querySelectorAll<HTMLButtonElement>('[data-reset]').forEach((b) =>
+        b.addEventListener('click', async () => {
+          const email = b.dataset.reset!;
+          if (!(await ask(`Сбросить пароль для ${email}? Старый перестанет работать, пользователь выйдет на всех устройствах.`, 'Сбросить', true))) return;
+          try {
+            const r = await api.adminResetPassword(email);
+            showTempPassword(r.email, r.password);
+          } catch (ex) {
+            toast(ex instanceof ApiError ? ex.message : 'Сервер недоступен');
+          }
+        }),
       );
       body.querySelectorAll<HTMLButtonElement>('[data-access]').forEach((b) =>
         b.addEventListener('click', () => setAccess(b.dataset.access!, b.dataset.status as 'active' | 'blocked')),
@@ -2998,6 +3048,124 @@ function bindAuth(root: HTMLElement) {
   });
 }
 
+/** Поле пароля с кнопкой «показать» и, для нового пароля, индикатором надёжности. */
+function pwField(id: string, name: string, label: string, autocomplete: string, placeholder = '', meter = false): string {
+  return `
+    <div class="field">
+      <label class="field-label" for="${id}">${icon('shield')}<span>${label}</span></label>
+      <div class="pw-wrap">
+        <input id="${id}" name="${name}" type="password" autocomplete="${autocomplete}" required minlength="8" placeholder="${esc(placeholder)}"
+          spellcheck="false" autocapitalize="off" ${meter ? 'data-meter' : ''} />
+        <button type="button" class="pw-toggle" data-pw-toggle="${id}" aria-label="Показать пароль" aria-pressed="false">${icon('eye')}</button>
+      </div>
+      ${meter ? `<div class="pw-meter" data-meter-for="${id}" data-score="0"><i></i><i></i><i></i><i></i><span></span></div>` : ''}
+    </div>`;
+}
+
+function passwordStrength(pw: string): { score: number; label: string } {
+  if (!pw) return { score: 0, label: '' };
+  if (pw.length < 8) return { score: 1, label: 'Слишком короткий' };
+  let score = 1;
+  if (pw.length >= 12) score++;
+  if (/[a-zа-я]/.test(pw) && /[A-ZА-Я]/.test(pw)) score++;
+  if (/\d/.test(pw) && /[^\p{L}\d]/u.test(pw)) score++;
+  else if (/\d/.test(pw) || /[^\p{L}\d]/u.test(pw)) score += 0.5;
+  if (/^(.)\1+$/.test(pw) || /^(12345|qwerty|password|йцукен)/i.test(pw)) score = 1;
+  const s = Math.min(4, Math.round(score));
+  return { score: s, label: ['', 'Слабый', 'Средний', 'Хороший', 'Надёжный'][s] };
+}
+
+function bindPasswordChange(root: HTMLElement) {
+  const form = $<HTMLFormElement>('#pw-form', root);
+  const open = $<HTMLButtonElement>('[data-action=pw-open]', root);
+  if (!form || !open) return;
+  const toggle = (show: boolean) => {
+    open.setAttribute('aria-expanded', String(show));
+    if (show) {
+      form.hidden = false;
+      requestAnimationFrame(() => form.classList.add('open'));
+      $<HTMLInputElement>('#pw-current', form)?.focus();
+    } else {
+      form.classList.remove('open');
+      form.reset();
+      form.querySelectorAll<HTMLElement>('.pw-meter').forEach((m) => (m.dataset.score = '0'));
+      setTimeout(() => (form.hidden = !form.classList.contains('open') ? true : form.hidden), 220);
+    }
+  };
+  open.addEventListener('click', () => toggle(form.hidden || !form.classList.contains('open')));
+  $('[data-action=pw-cancel]', form)?.addEventListener('click', () => toggle(false));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const current = String(fd.get('current') ?? '');
+    const next = String(fd.get('next') ?? '');
+    const repeat = String(fd.get('repeat') ?? '');
+    const err = $('#pw-error', form)!;
+    const fail = (msg: string, field?: string) => {
+      err.textContent = msg;
+      err.hidden = false;
+      form.classList.remove('shake');
+      void form.offsetWidth;
+      form.classList.add('shake');
+      if (field) $<HTMLInputElement>(`#${field}`, form)?.focus();
+    };
+    if (!current) return fail('Введите текущий пароль.', 'pw-current');
+    if (next.length < 8) return fail('Новый пароль — минимум 8 символов.', 'pw-next');
+    if (next !== repeat) return fail('Пароли не совпадают.', 'pw-repeat');
+    if (next === current) return fail('Новый пароль совпадает с текущим.', 'pw-next');
+    const btn = $<HTMLButtonElement>('[type=submit]', form)!;
+    btn.disabled = true;
+    btn.classList.add('loading');
+    try {
+      await api.changePassword(current, next);
+      err.hidden = true;
+      toggle(false);
+      toast('Пароль изменён');
+    } catch (ex) {
+      if (ex instanceof ApiError && ex.code === 'current') fail(ex.message, 'pw-current');
+      else fail(ex instanceof ApiError ? ex.message : 'Сервер недоступен, попробуйте позже.');
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+    }
+  });
+}
+
+/** Временный пароль после сброса: показываем один раз, с кнопкой «Скопировать». */
+function showTempPassword(email: string, password: string) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="tmp-title">
+      <div class="modal-icon">${icon('key')}</div>
+      <p id="tmp-title"><b>Временный пароль для ${esc(email)}</b></p>
+      <div class="temp-pw"><code>${esc(password)}</code><button class="btn small" data-copy>${icon('copy')}Скопировать</button></div>
+      <p class="muted small">Передайте его пользователю лично — после входа он сменит пароль в профиле. Больше этот пароль не будет показан.</p>
+      <div class="modal-actions"><button class="btn primary" data-close>Готово</button></div>
+    </div>`;
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+  overlay.addEventListener('click', async (e) => {
+    const t = e.target as HTMLElement;
+    if (t === overlay || t.closest('[data-close]')) return close();
+    const copy = t.closest<HTMLButtonElement>('[data-copy]');
+    if (copy) {
+      try {
+        await navigator.clipboard.writeText(password);
+        copy.innerHTML = `${icon('check')}Скопировано`;
+      } catch {
+        toast('Не удалось скопировать — выделите вручную');
+      }
+    }
+  });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+  overlay.querySelector<HTMLButtonElement>('[data-copy]')!.focus();
+}
+
 /** Форма входа и регистрации — на приветственной странице для гостей. */
 function authCardHtml(): string {
   return `
@@ -3017,7 +3185,7 @@ function authCardHtml(): string {
             : ''
         }
         <div class="field"><label class="field-label" for="a-email">${icon('info')}<span>Email</span></label><input id="a-email" name="email" type="email" autocomplete="email" required placeholder="name@mail.com" value="${esc(profile?.email ?? '')}" /></div>
-        <div class="field"><label class="field-label" for="a-password">${icon('shield')}<span>Пароль</span></label><input id="a-password" name="password" type="password" autocomplete="${authMode === 'login' ? 'current-password' : 'new-password'}" required minlength="8" placeholder="${authMode === 'login' ? '' : 'Минимум 8 символов'}" /></div>
+        ${pwField('a-password', 'password', 'Пароль', authMode === 'login' ? 'current-password' : 'new-password', authMode === 'login' ? '' : 'Минимум 8 символов', authMode === 'register')}
         ${
           authMode === 'register'
             ? `<div class="hp" aria-hidden="true"><label>Сайт <input name="website" type="text" tabindex="-1" autocomplete="off" /></label></div>
@@ -3088,6 +3256,29 @@ function renderProfile(root: HTMLElement) {
         </div>
       </form>
 
+      ${
+        account
+          ? `<div class="card security">
+        <div class="card-head">${icon('key')}<h2>Безопасность</h2></div>
+        <div class="security-row">
+          <div><b>Пароль</b><span class="muted small">Вход по ${esc(account.email)}</span></div>
+          <button class="btn small" data-action="pw-open" aria-expanded="false" aria-controls="pw-form">${icon('key')}Сменить пароль</button>
+        </div>
+        <form class="pw-form collapse" id="pw-form" novalidate hidden>
+          ${pwField('pw-current', 'current', 'Текущий пароль', 'current-password')}
+          ${pwField('pw-next', 'next', 'Новый пароль', 'new-password', 'Минимум 8 символов', true)}
+          ${pwField('pw-repeat', 'repeat', 'Повторите новый пароль', 'new-password')}
+          <p class="form-error" id="pw-error" role="alert" hidden></p>
+          <p class="field-hint">После смены пароля вы останетесь в аккаунте здесь, а на других устройствах нужно будет войти заново.</p>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">${icon('check')}Сохранить пароль</button>
+            <button class="btn ghost" type="button" data-action="pw-cancel">Отмена</button>
+          </div>
+        </form>
+      </div>`
+          : ''
+      }
+
       <div class="card">
         <div class="card-head">${icon('wallet')}<h2>Мои оклады</h2></div>
         ${
@@ -3147,6 +3338,7 @@ function renderProfile(root: HTMLElement) {
   });
 
   $('[data-goto=settings]', root)?.addEventListener('click', () => go('settings'));
+  bindPasswordChange(root);
   $('[data-action=logout]', root)?.addEventListener('click', async () => {
     if (!(await ask('Выйти из аккаунта? Данные аккаунта будут удалены с этого устройства (в облаке они сохранятся).', 'Выйти')))
       return;
@@ -3558,6 +3750,29 @@ async function boot() {
     }
   }
 
+  // Показ пароля и индикатор надёжности — для всех полей пароля в приложении.
+  app.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-pw-toggle]');
+    if (!b) return;
+    const input = document.getElementById(b.dataset.pwToggle!) as HTMLInputElement | null;
+    if (!input) return;
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    b.setAttribute('aria-pressed', String(show));
+    b.setAttribute('aria-label', show ? 'Скрыть пароль' : 'Показать пароль');
+    b.innerHTML = icon(show ? 'eyeOff' : 'eye');
+    input.focus({ preventScroll: true });
+  });
+  app.addEventListener('input', (e) => {
+    const input = e.target as HTMLInputElement;
+    if (!input.matches('[data-meter]')) return;
+    const m = document.querySelector<HTMLElement>(`[data-meter-for="${input.id}"]`);
+    if (!m) return;
+    const { score, label } = passwordStrength(input.value);
+    m.dataset.score = String(score);
+    m.querySelector('span')!.textContent = label;
+  });
+
   // Ссылки на разделы внутри страниц (например, «условия использования» в форме регистрации).
   app.addEventListener('click', (e) => {
     const t = (e.target as HTMLElement).closest<HTMLElement>('#view [data-view]');
@@ -3579,6 +3794,9 @@ async function boot() {
 
   applyTheme();
   renderShell();
+  // Каскад карточек при первом показе; дальше — только при переходах между разделами.
+  document.body.classList.add('booted');
+  setTimeout(() => document.body.classList.remove('booted'), 900);
 
   if ('serviceWorker' in navigator && import.meta.env.PROD && !IS_EMBED) {
     navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {});

@@ -560,4 +560,39 @@ describe.skipIf(!URL_)('API (Postgres)', () => {
     cookie = again.headers.get('set-cookie')!.split(';')[0];
     expect((await (await call('/api/regulation')).json()).error).toContain('закрыт');
   });
+  it('смена пароля и сброс администратором', async () => {
+    cookie = '';
+    const r = await register({ email: 'pw@example.com', password: 'old-password' });
+    const first = r.headers.get('set-cookie')!.split(';')[0];
+    const second = (await call('/api/auth/login', { method: 'POST', json: { email: 'pw@example.com', password: 'old-password' } }))
+      .headers.get('set-cookie')!.split(';')[0];
+
+    cookie = first;
+    const wrong = await call('/api/auth/password', { method: 'POST', json: { current: 'nope-nope', next: 'new-password' } });
+    expect(wrong.status).toBe(400);
+    expect((await wrong.json()).code).toBe('current');
+    expect((await call('/api/auth/password', { method: 'POST', json: { current: 'old-password', next: 'short' } })).status).toBe(400);
+    expect((await call('/api/auth/password', { method: 'POST', json: { current: 'old-password', next: 'old-password' } })).status).toBe(400);
+    expect((await call('/api/auth/password', { method: 'POST', json: { current: 'old-password', next: 'new-password' } })).status).toBe(200);
+
+    expect((await call('/api/me')).status).toBe(200); // текущая сессия осталась
+    cookie = second;
+    expect((await call('/api/me')).status).toBe(401); // другое устройство вышло
+    cookie = '';
+    expect((await call('/api/auth/login', { method: 'POST', json: { email: 'pw@example.com', password: 'old-password' } })).status).toBe(401);
+    expect((await call('/api/auth/login', { method: 'POST', json: { email: 'pw@example.com', password: 'new-password' } })).status).toBe(200);
+
+    cookie = first;
+    expect((await call('/api/admin/password-reset', { method: 'POST', json: { email: 'pw@example.com' } })).status).toBe(403);
+    const adm = await call('/api/auth/login', { method: 'POST', json: { email: 'admin@example.com', password: 'password1' } });
+    cookie = adm.headers.get('set-cookie')!.split(';')[0];
+    expect((await call('/api/admin/password-reset', { method: 'POST', json: { email: 'admin@example.com' } })).status).toBe(400);
+    const reset = await (await call('/api/admin/password-reset', { method: 'POST', json: { email: 'pw@example.com' } })).json();
+    expect(reset.password).toMatch(/^[a-zA-Z2-9]{10}$/);
+    cookie = first;
+    expect((await call('/api/me')).status).toBe(401);
+    cookie = '';
+    expect((await call('/api/auth/login', { method: 'POST', json: { email: 'pw@example.com', password: 'new-password' } })).status).toBe(401);
+    expect((await call('/api/auth/login', { method: 'POST', json: { email: 'pw@example.com', password: reset.password } })).status).toBe(200);
+  });
 });

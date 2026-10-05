@@ -3599,3 +3599,434 @@ input[type='password']:focus {
   border-radius: 10px;
   border-top-color: transparent;
 }
+
+/* ---------- движение и отклик ---------- */
+
+:root {
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+/* Переход между разделами: карточки страницы появляются каскадом. */
+#view.enter > .page > *,
+body.booted #view > .page > * {
+  animation: rise 0.42s var(--ease-out) both;
+}
+
+#view.enter.from-right > .page > * {
+  animation-name: rise-right;
+}
+
+#view.enter.from-left > .page > * {
+  animation-name: rise-left;
+}
+
+#view.enter > .page > :nth-child(2),
+body.booted #view > .page > :nth-child(2) {
+  animation-delay: 0.04s;
+}
+#view.enter > .page > :nth-child(3),
+body.booted #view > .page > :nth-child(3) {
+  animation-delay: 0.08s;
+}
+#view.enter > .page > :nth-child(4),
+body.booted #view > .page > :nth-child(4) {
+  animation-delay: 0.12s;
+}
+#view.enter > .page > :nth-child(5),
+body.booted #view > .page > :nth-child(5) {
+  animation-delay: 0.16s;
+}
+#view.enter > .page > :nth-child(n + 6),
+body.booted #view > .page > :nth-child(n + 6) {
+  animation-delay: 0.2s;
+}
+
+/* Первый показ — один раз; дальше страницы перерисовываются без анимации. */
+body.booted #view > .page > * {
+  animation-iteration-count: 1;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
+@keyframes rise-right {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+@keyframes rise-left {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+}
+
+/* Кнопки: мягкий отклик на нажатие. */
+.btn,
+.chip,
+.icon-btn,
+.seg,
+.tab,
+.nav-link,
+.avatar,
+.term-box {
+  transition:
+    transform 0.14s var(--ease-out),
+    background-color 0.18s,
+    border-color 0.18s,
+    color 0.18s,
+    box-shadow 0.18s,
+    filter 0.18s;
+}
+
+.btn:active:not(:disabled),
+.chip:active,
+.icon-btn:active,
+.seg:active,
+.avatar:active,
+.term-box:active {
+  transform: scale(0.965);
+}
+
+.btn.primary:hover:not(:disabled) {
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 32%, transparent);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+}
+
+.btn.loading {
+  position: relative;
+  color: transparent !important;
+}
+
+.btn.loading::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-color: var(--primary-ink) var(--primary-ink) transparent transparent;
+  animation: spin 0.7s linear infinite;
+}
+
+/* Кликабельные карточки чуть приподнимаются. */
+.card.to-calc {
+  transition:
+    transform 0.2s var(--ease-out),
+    box-shadow 0.2s,
+    border-color 0.2s;
+}
+
+@media (hover: hover) {
+  .card.to-calc:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+  }
+  .card.to-calc:hover > .icon:last-child {
+    transform: translateX(3px) rotate(-90deg);
+  }
+}
+
+.card.to-calc > .icon:last-child {
+  transition: transform 0.2s var(--ease-out);
+}
+
+/* Нижние вкладки: активная иконка «подпрыгивает» на подложке. */
+.tab {
+  position: relative;
+}
+
+.tab .icon {
+  position: relative;
+  z-index: 1;
+}
+
+.tab::before {
+  content: '';
+  position: absolute;
+  top: 9px;
+  left: 50%;
+  width: 52px;
+  height: 30px;
+  margin-left: -26px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 0.2s,
+    transform 0.28s var(--ease-spring);
+}
+
+.tab.active::before {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.tab.active .icon {
+  animation: tab-pop 0.38s var(--ease-spring);
+}
+
+@keyframes tab-pop {
+  40% {
+    transform: translateY(-3px) scale(1.12);
+  }
+}
+
+/* Тост — пружинит снизу. */
+.toast {
+  transition:
+    opacity 0.2s,
+    transform 0.32s var(--ease-spring);
+}
+
+.modal-overlay {
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+.modal {
+  animation: pop 0.26s var(--ease-spring);
+}
+
+/* Итог «К выплате»: короткий импульс при изменении. */
+.hero-value.bump {
+  animation: bump 0.45s var(--ease-out);
+}
+
+@keyframes bump {
+  30% {
+    transform: scale(1.025);
+    text-shadow: 0 0 22px color-mix(in srgb, var(--logo-ring) 45%, transparent);
+  }
+}
+
+.hero-value {
+  transform-origin: left center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Поля ввода: мягкое кольцо фокуса. */
+input,
+select,
+textarea {
+  transition:
+    border-color 0.16s,
+    box-shadow 0.2s,
+    background-color 0.16s;
+}
+
+/* Логотип приветствия. */
+.gate-hero .logo-mark {
+  animation: float-in 0.7s var(--ease-spring) both;
+  filter: drop-shadow(0 10px 22px color-mix(in srgb, var(--logo-ring) 30%, transparent));
+}
+
+@keyframes float-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) rotate(-12deg) scale(0.86);
+  }
+}
+
+.brand .logo-mark {
+  transition: transform 0.4s var(--ease-spring);
+}
+
+.brand:hover .logo-mark {
+  transform: rotate(-10deg) scale(1.06);
+}
+
+/* Скелетон вместо «Загружаю…». */
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.skeleton i {
+  display: block;
+  height: 14px;
+  border-radius: 7px;
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 40%, var(--surface-2) 80%);
+  background-size: 300% 100%;
+  animation: shimmer 1.3s linear infinite;
+}
+
+.skeleton i:nth-child(2) {
+  width: 78%;
+}
+
+.skeleton i:nth-child(3) {
+  width: 52%;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -150% 0;
+  }
+}
+
+/* ---------- пароль ---------- */
+
+.pw-wrap {
+  position: relative;
+}
+
+.pw-wrap input {
+  width: 100%;
+  padding-right: 48px;
+}
+
+.pw-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin-top: -18px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.pw-toggle:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+
+.pw-toggle .icon {
+  width: 19px;
+  height: 19px;
+}
+
+.pw-meter {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.pw-meter i {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  transition: background-color 0.25s;
+}
+
+.pw-meter span {
+  min-width: 108px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.pw-meter[data-score='1'] i:nth-child(-n + 1) {
+  background: var(--danger);
+}
+.pw-meter[data-score='2'] i:nth-child(-n + 2) {
+  background: #e8a10c;
+}
+.pw-meter[data-score='3'] i:nth-child(-n + 3) {
+  background: var(--c-piece);
+}
+.pw-meter[data-score='4'] i {
+  background: var(--ok);
+}
+.pw-meter[data-score='0'] span:empty::after {
+  content: ' ';
+}
+
+.security-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.security-row > div {
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.pw-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 0;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition:
+    max-height 0.32s var(--ease-out),
+    opacity 0.22s,
+    margin-top 0.32s var(--ease-out);
+}
+
+.pw-form.open {
+  max-height: 720px;
+  opacity: 1;
+  margin-top: 16px;
+}
+
+.shake {
+  animation: shake 0.36s;
+}
+
+@keyframes shake {
+  20%,
+  60% {
+    transform: translateX(-6px);
+  }
+  40%,
+  80% {
+    transform: translateX(6px);
+  }
+}
+
+.temp-pw {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 10px 10px 16px;
+  border-radius: 14px;
+  background: var(--surface-2);
+  border: 1px dashed var(--line);
+}
+
+.temp-pw code {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  letter-spacing: 0.06em;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .hide-sm {
+    display: none;
+  }
+}
